@@ -30,7 +30,12 @@ Node.js 22 or 24.
 ## Command Line Interface
 
 ```bash
-npm install -g webcrack
+npm install -g pnpm 
+pnpm install
+npm run build
+npm install -g .\packages\webcrack
+npm ls -g --depth=0
+webcrack -h
 ```
 
 Examples:
