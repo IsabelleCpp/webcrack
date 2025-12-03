@@ -31,11 +31,13 @@ export default {
 
     const logger = debug('webcrack:deobfuscate');
     const stringArray = findStringArray(ast);
+
     logger(
       stringArray
-        ? `String Array: ${stringArray.originalName}, length ${stringArray.length}`
+        ? `String Array: ${stringArray.originalName}, length ${stringArray.length}, foundBy ${stringArray.foundBy}`
         : 'String Array: no',
     );
+
     if (!stringArray) return;
 
     const rotator = findArrayRotator(stringArray);
