@@ -8,15 +8,19 @@ import {
   renameFast,
   undefinedMatcher,
 } from '../ast-utils';
+const generate = require('@babel/generator').default;
 
 export interface StringArray {
   path: NodePath<t.Node>;
-  references: NodePath[];
-  name: string;
-  originalName: string;
+  references: NodePath<t.Node>[];
+  name: string; // e.g. '__STRING_ARRAY__'
+  originalName: string; // e.g. 'rPex3CI'
   length: number;
-  foundBy: 'function' | 'variable' | 'call' | 'expression';
+  /** Optional JS source string that defines the array, e.g. `var __STRING_ARRAY__ = ["a","b"];` */
+  definition?: string;
+  foundBy?: 'function' | 'variable' | 'call' | 'expression';
 }
+
 
 export function findStringArray(ast: t.Node): StringArray | undefined {
   let result: StringArray | undefined;
@@ -160,13 +164,21 @@ export function findStringArray(ast: t.Node): StringArray | undefined {
       const arrayBinding = path.scope.getBinding(arrayId.name);
       if (arrayBinding) renameFast(arrayBinding, '__STRING_ARRAY__');
 
+      // Generate a JS source string for the array expression and build a variable definition
+      // that assigns it to __STRING_ARRAY__ (this is what you'll inject into your VM).
+      const arrayCode = generate(arr).code; // e.g. '["a","b","c"]' or '[,"a",`b`]'
+      const varName = '__STRING_ARRAY__';
+      const definitionString = `var ${varName} = ${arrayCode};`;
+
       result = {
         path: fnBinding.path as NodePath<t.Node>,
         references: arrayBinding ? arrayBinding.referencePaths : [],
         originalName,
-        name: '__STRING_ARRAY__',
+        name: varName,
         length,
         foundBy: 'call',
+        // string containing the variable definition you can feed into a VM to recreate the array
+        definition: definitionString,
       };
 
       path.stop();

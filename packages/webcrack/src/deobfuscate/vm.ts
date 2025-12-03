@@ -59,7 +59,7 @@ export class VMDecoder {
       .map((decoder) => generate(decoder.path.node, generateOptions))
       .join(';\n');
 
-    this.setupCode = [stringArrayCode, rotatorCode, decoderCode].join(';\n');
+    this.setupCode = [stringArrayCode, rotatorCode, decoderCode, stringArray.definition].join(';\n');
   }
 
   async decode(calls: NodePath<CallExpression>[]): Promise<unknown[]> {

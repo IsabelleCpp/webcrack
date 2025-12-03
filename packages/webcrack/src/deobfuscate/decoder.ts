@@ -144,8 +144,11 @@ export interface StringArray {
   name: string; // e.g. '__STRING_ARRAY__'
   originalName: string; // e.g. 'rPex3CI'
   length: number;
+  /** Optional JS source string that defines the array, e.g. `var __STRING_ARRAY__ = ["a","b"];` */
+  definition?: string;
   foundBy?: 'function' | 'variable' | 'call' | 'expression';
 }
+
 
 /**
  * Find decoder functions that read from the string array and decode entries.
