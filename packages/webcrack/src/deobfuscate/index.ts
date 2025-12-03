@@ -43,12 +43,8 @@ export default {
     const rotator = findArrayRotator(stringArray);
     logger(`String Array Rotate: ${rotator ? 'yes' : 'no'}`);
 
-    const decoders = findDecoders(stringArray);
-    logger(
-      `String Array Decoders: ${decoders
-        .map((d) => d.originalName)
-        .join(', ')}`,
-    );
+    const decoders = findDecoders(stringArray, (m) => logger(m));
+    logger(`String Array Decoders: ${decoders.map((d) => d.originalName).join(', ')}`);
 
     state.changes += applyTransform(ast, inlineObjectProps).changes;
 
