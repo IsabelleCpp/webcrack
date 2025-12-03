@@ -77,7 +77,45 @@ export class Decoder {
       } else if (literalCall.match(ref.parent)) {
         calls.push(ref.parentPath as NodePath<t.CallExpression>);
       } else if (expressionCall.match(ref.parent)) {
-        // var n = 1; decode(n); -> decode(1);
+        // First: inline array member accesses like kyJECEl[14] -> 88
+        ref.parentPath!.traverse({
+          MemberExpression(path) {
+            const node = path.node;
+            // only handle computed member expressions with identifier object
+            if (!node.computed || !t.isIdentifier(node.object)) return;
+
+            const objName = node.object.name;
+            const objBinding = path.scope.getBinding(objName);
+            if (!objBinding) return;
+
+            const declarator = objBinding.path.node;
+            if (!t.isVariableDeclarator(declarator)) return;
+            const init = declarator.init;
+            if (!t.isArrayExpression(init)) return;
+
+            // resolve numeric index (supports simple unary negative)
+            let idx: number | null = null;
+            if (t.isNumericLiteral(node.property)) {
+              idx = node.property.value;
+            } else if (
+              t.isUnaryExpression(node.property) &&
+              node.property.operator === '-' &&
+              t.isNumericLiteral(node.property.argument)
+            ) {
+              idx = -node.property.argument.value;
+            } else {
+              return;
+            }
+
+            const element = init.elements[idx];
+            if (!element) return;
+
+            // replace with the array element (clone to avoid reusing nodes)
+            path.replaceWith(t.cloneNode(element as t.Expression, /* deep */ true));
+          },
+        });
+
+        // Then: inline simple variables so decode(n) -> decode(1)
         ref.parentPath!.traverse({
           ReferencedIdentifier(path) {
             const varBinding = path.scope.getBinding(path.node.name)!;
@@ -85,6 +123,7 @@ export class Decoder {
             inlineVariable(varBinding, literalArgument, true);
           },
         });
+
         if (literalCall.match(ref.parent)) {
           calls.push(ref.parentPath as NodePath<t.CallExpression>);
         }
@@ -97,6 +136,7 @@ export class Decoder {
     return calls;
   }
 }
+
 
 export interface StringArray {
   path: NodePath<t.Node>;
