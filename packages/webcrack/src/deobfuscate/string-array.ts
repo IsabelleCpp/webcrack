@@ -596,11 +596,10 @@ export function findStringArray(ast: t.Node): StringArray | undefined {
   removeEmptyFunctionWrapper(ast);
   inlineConstArrayAccesses(ast);
 
-  const globalDefs = getGlobalDefinitionsIncludingLaterAssignments(ast);
-
-  if (globalDefs && globalDefs.trim().length && result) {
-    result.definition += '\n\n' + globalDefs;
-  }
+  // const globalDefs = getGlobalDefinitionsIncludingLaterAssignments(ast);
+  // if (globalDefs && globalDefs.trim().length && result) {
+  //   result.definition += '\n\n' + globalDefs;
+  // }
 
   return result;
 }

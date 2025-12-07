@@ -67,79 +67,80 @@ export class Decoder {
     const buildExtractedConditional = expression`TEST ? CALLEE(CONSEQUENT) : CALLEE(ALTERNATE)`;
 
     const binding = this.path.scope.getBinding(this.name)!;
-    for (const ref of binding.referencePaths) {
-      
-      if (conditionalCall.match(ref.parent)) {
-        // decode(test ? 1 : 2) -> test ? decode(1) : decode(2)
-        const [replacement] = ref.parentPath!.replaceWith(
-          buildExtractedConditional({
-            TEST: conditional.current!.test,
-            CALLEE: ref.parent.callee,
-            CONSEQUENT: conditional.current!.consequent,
-            ALTERNATE: conditional.current!.alternate,
-          }),
-        );
-        replacement.scope.crawl();
-        continue;
-      } else if (literalCall.match(ref.parent)) {
-        calls.push(ref.parentPath as NodePath<t.CallExpression>);
-      } else if (expressionCall.match(ref.parent)) {
-        // After inlining const arrays above, try again to inline member expressions inside this call
-        ref.parentPath!.traverse({
-          MemberExpression(path) {
-            const node = path.node;
-            // only handle computed member expressions with identifier object
-            if (!node.computed || !t.isIdentifier(node.object)) return;
-
-            const objName = node.object.name;
-            const objBinding = path.scope.getBinding(objName);
-            if (!objBinding) return;
-
-            const declarator = objBinding.path.node;
-            if (!t.isVariableDeclarator(declarator)) return;
-            const init = declarator.init;
-            if (!t.isArrayExpression(init)) return;
-
-            // resolve numeric index (supports simple unary negative)
-            let idx: number | null = null;
-            if (t.isNumericLiteral(node.property)) {
-              idx = node.property.value;
-            } else if (
-              t.isUnaryExpression(node.property) &&
-              node.property.operator === '-' &&
-              t.isNumericLiteral(node.property.argument)
-            ) {
-              idx = -node.property.argument.value;
-            } else {
-              return;
-            }
-
-            const element = init.elements[idx];
-            if (!element) return;
-
-            // replace with the array element (clone to avoid reusing nodes)
-            path.replaceWith(t.cloneNode(element as t.Expression, /* deep */ true));
-          },
-        });
-
-        // Then: inline simple variables so decode(n) -> decode(1)
-        ref.parentPath!.traverse({
-          ReferencedIdentifier(path) {
-            const varBinding = path.scope.getBinding(path.node.name)!;
-            if (!varBinding) return;
-            inlineVariable(varBinding, literalArgument, true);
-          },
-        });
-
-        if (literalCall.match(ref.parent)) {
+    if (binding){
+      for (const ref of binding.referencePaths) {
+        
+        if (conditionalCall.match(ref.parent)) {
+          // decode(test ? 1 : 2) -> test ? decode(1) : decode(2)
+          const [replacement] = ref.parentPath!.replaceWith(
+            buildExtractedConditional({
+              TEST: conditional.current!.test,
+              CALLEE: ref.parent.callee,
+              CONSEQUENT: conditional.current!.consequent,
+              ALTERNATE: conditional.current!.alternate,
+            }),
+          );
+          replacement.scope.crawl();
+          continue;
+        } else if (literalCall.match(ref.parent)) {
           calls.push(ref.parentPath as NodePath<t.CallExpression>);
+        } else if (expressionCall.match(ref.parent)) {
+          // After inlining const arrays above, try again to inline member expressions inside this call
+          ref.parentPath!.traverse({
+            MemberExpression(path) {
+              const node = path.node;
+              // only handle computed member expressions with identifier object
+              if (!node.computed || !t.isIdentifier(node.object)) return;
+
+              const objName = node.object.name;
+              const objBinding = path.scope.getBinding(objName);
+              if (!objBinding) return;
+
+              const declarator = objBinding.path.node;
+              if (!t.isVariableDeclarator(declarator)) return;
+              const init = declarator.init;
+              if (!t.isArrayExpression(init)) return;
+
+              // resolve numeric index (supports simple unary negative)
+              let idx: number | null = null;
+              if (t.isNumericLiteral(node.property)) {
+                idx = node.property.value;
+              } else if (
+                t.isUnaryExpression(node.property) &&
+                node.property.operator === '-' &&
+                t.isNumericLiteral(node.property.argument)
+              ) {
+                idx = -node.property.argument.value;
+              } else {
+                return;
+              }
+
+              const element = init.elements[idx];
+              if (!element) return;
+
+              // replace with the array element (clone to avoid reusing nodes)
+              path.replaceWith(t.cloneNode(element as t.Expression, /* deep */ true));
+            },
+          });
+
+          // Then: inline simple variables so decode(n) -> decode(1)
+          ref.parentPath!.traverse({
+            ReferencedIdentifier(path) {
+              const varBinding = path.scope.getBinding(path.node.name)!;
+              if (!varBinding) return;
+              inlineVariable(varBinding, literalArgument, true);
+            },
+          });
+
+          if (literalCall.match(ref.parent)) {
+            calls.push(ref.parentPath as NodePath<t.CallExpression>);
+          }
+        } else if (ref.parentPath?.isExpressionStatement()) {
+          // `decode;` may appear on it's own in some forked obfuscators
+          ref.parentPath.remove();
         }
-      } else if (ref.parentPath?.isExpressionStatement()) {
-        // `decode;` may appear on it's own in some forked obfuscators
-        ref.parentPath.remove();
       }
     }
-    
     // If we have a calleePath (the actual function that does decoding) or at least the decoder function path,
     // prepare a FunctionExpression and dependency clones to inline at each call site.
     const calleeFnPath = this.calleePath ?? (this.path.isFunctionDeclaration() ? (this.path as NodePath<t.FunctionDeclaration>) : null);
@@ -410,6 +411,9 @@ export function findDecoders(
         logger?.(`findDecoders: error scanning callee for dependencies: ${(e as Error).message}`);
       }
     }
+    else{
+      continue;
+    }
 
     const oldName = getFunctionName(fnPath);
     const newName = `__DECODE_${decoders.length}__`;
@@ -437,7 +441,7 @@ export function findDecoders(
           if (dep && dep.node && t.isFunctionDeclaration(dep.node) && dep.node.id && t.isIdentifier(dep.node.id)) {
             const depBinding = dep.scope.getBinding(dep.node.id.name);
             if (depBinding) {
-              const depNewName = `__DECODE_DEP_${decoders.length}_${dep.node.id.name}`;
+              const depNewName = `__DECODE_INTERNAL_DEP__`;
               logger?.(`findDecoders: renaming dependency ${dep.node.id.name} -> ${depNewName}`);
               renameFast(depBinding, depNewName);
               const updated = dep.scope.getBinding(depNewName);
@@ -476,7 +480,7 @@ export function findDecoders(
       if (dep && dep.node && t.isFunctionDeclaration(dep.node) && dep.node.id && t.isIdentifier(dep.node.id)) {
         const depBinding = dep.scope.getBinding(dep.node.id.name);
         if (depBinding) {
-          const depNewName = `__DECODE_DEP_${decoders.length}_${dep.node.id.name}`;
+          const depNewName = `__DECODE_INTERNAL_DEP__`;
           logger?.(`findDecoders: renaming dependency ${dep.node.id.name} -> ${depNewName}`);
           renameFast(depBinding, depNewName);
           const updated = dep.scope.getBinding(depNewName);
