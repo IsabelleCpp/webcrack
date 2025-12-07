@@ -65,10 +65,7 @@ function removeEmptyFunctionWrapper(ast: t.Node) {
           }
         }
       }
-      const updatedBinding = path.scope.getBinding(fnName);
-      if (!updatedBinding || updatedBinding.referencePaths.length === 0) {
-        path.remove();
-      }
+      path.remove();
     },
   });
 }
