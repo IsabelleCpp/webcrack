@@ -134,6 +134,159 @@ function inlineConstArrayAccesses(ast: t.Node) {
   });
 }
 
+function getGlobalDefinitionsIncludingLaterAssignments(ast: t.Node): string {
+  const defs: Map<string, t.Node> = new Map();
+  const orderedKeys: string[] = [];
+
+  function isWeakVarDecl(node: t.Node): boolean {
+    if (!t.isVariableDeclaration(node)) return false;
+    return node.declarations.every(d => !d.init);
+  }
+
+  function isStrongDefinition(node: t.Node): boolean {
+    if (t.isFunctionDeclaration(node) || t.isClassDeclaration(node)) return true;
+    if (t.isVariableDeclaration(node)) {
+      return node.declarations.some(d => !!d.init);
+    }
+    if (t.isExpressionStatement(node) && t.isAssignmentExpression(node.expression)) return true;
+    return false;
+  }
+
+  traverse(ast, {
+    Program(path) {
+      for (const node of path.node.body) {
+        if (t.isVariableDeclaration(node)) {
+          for (const decl of node.declarations) {
+            if (!t.isIdentifier(decl.id)) continue;
+            const name = decl.id.name;
+            if (!defs.has(name)) {
+              defs.set(name, node);
+              orderedKeys.push(name);
+            } else {
+              const existing = defs.get(name);
+              if (existing && isWeakVarDecl(existing) && isStrongDefinition(node)) {
+                defs.set(name, node);
+              } else if (existing && t.isVariableDeclaration(existing) && node.kind === 'var') {
+                defs.set(name, node);
+              }
+            }
+          }
+          continue;
+        }
+
+        if (t.isFunctionDeclaration(node) && node.id && t.isIdentifier(node.id)) {
+          const name = node.id.name;
+          if (!defs.has(name)) {
+            defs.set(name, node);
+            orderedKeys.push(name);
+          } else {
+            const existing = defs.get(name);
+            if (existing && isWeakVarDecl(existing)) {
+              defs.set(name, node);
+            }
+          }
+          continue;
+        }
+
+        if (t.isClassDeclaration(node) && node.id && t.isIdentifier(node.id)) {
+          const name = node.id.name;
+          if (!defs.has(name)) {
+            defs.set(name, node);
+            orderedKeys.push(name);
+          } else {
+            const existing = defs.get(name);
+            if (existing && isWeakVarDecl(existing)) {
+              defs.set(name, node);
+            }
+          }
+          continue;
+        }
+
+        if (t.isExpressionStatement(node) && t.isAssignmentExpression(node.expression)) {
+          const assign = node.expression;
+          if (t.isIdentifier(assign.left)) {
+            const name = assign.left.name;
+            if (!defs.has(name)) {
+              defs.set(name, node);
+              orderedKeys.push(name);
+            } else {
+              const existing = defs.get(name);
+              if (existing && isWeakVarDecl(existing)) {
+                defs.set(name, node);
+              }
+            }
+            continue;
+          }
+          if (t.isMemberExpression(assign.left) && t.isIdentifier(assign.left.object) && !assign.left.computed) {
+            const name = assign.left.object.name;
+            if (!defs.has(name)) {
+              defs.set(name, node);
+              orderedKeys.push(name);
+            } else {
+              const existing = defs.get(name);
+              if (existing && isWeakVarDecl(existing)) {
+                defs.set(name, node);
+              }
+            }
+            continue;
+          }
+        }
+
+        if (t.isExportNamedDeclaration(node) || t.isExportDefaultDeclaration(node)) {
+          if (node.declaration) {
+            if (t.isVariableDeclaration(node.declaration)) {
+              for (const decl of node.declaration.declarations) {
+                if (!t.isIdentifier(decl.id)) continue;
+                const name = decl.id.name;
+                if (!defs.has(name)) {
+                  defs.set(name, node.declaration);
+                  orderedKeys.push(name);
+                } else {
+                  const existing = defs.get(name);
+                  if (existing && isWeakVarDecl(existing) && isStrongDefinition(node.declaration)) {
+                    defs.set(name, node.declaration);
+                  }
+                }
+              }
+            } else if ((t.isFunctionDeclaration(node.declaration) || t.isClassDeclaration(node.declaration)) && node.declaration.id) {
+              const name = node.declaration.id.name;
+              if (!defs.has(name)) {
+                defs.set(name, node.declaration);
+                orderedKeys.push(name);
+              } else {
+                const existing = defs.get(name);
+                if (existing && isWeakVarDecl(existing)) {
+                  defs.set(name, node.declaration);
+                }
+              }
+            }
+          } else {
+            const code = generate(node).code;
+            const key = `__export_${orderedKeys.length}`;
+            defs.set(key, t.identifier(code) as unknown as t.Node);
+            orderedKeys.push(key);
+          }
+        }
+      }
+      path.stop();
+    },
+  });
+
+  const out: string[] = [];
+  for (const key of orderedKeys) {
+    const node = defs.get(key);
+    if (!node) continue;
+    if ((node as any).type === 'Identifier' && typeof (node as any).name === 'string' && (node as any).name.startsWith('export')) {
+      out.push((node as any).name);
+      continue;
+    }
+    out.push(generate(node).code);
+  }
+
+  return out.join('\n\n');
+}
+
+
 
 export function findStringArray(ast: t.Node): StringArray | undefined {
   let result: StringArray | undefined;
@@ -442,6 +595,12 @@ export function findStringArray(ast: t.Node): StringArray | undefined {
   
   removeEmptyFunctionWrapper(ast);
   inlineConstArrayAccesses(ast);
+
+  const globalDefs = getGlobalDefinitionsIncludingLaterAssignments(ast);
+
+  if (globalDefs && globalDefs.trim().length && result) {
+    result.definition += '\n\n' + globalDefs;
+  }
 
   return result;
 }
