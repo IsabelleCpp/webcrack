@@ -8,64 +8,6 @@ import {
 } from '../ast-utils';
 
 /**
- * Inline computed accesses of const arrays within a given path.
- * Example: const A = ["a","b"]; ... A[1] -> "b"
- *
- * Only inlines when:
- * - The object is an Identifier
- * - The identifier resolves to a VariableDeclarator whose kind is 'const'
- * - The initializer is an ArrayExpression
- * - The property is a numeric literal or a simple unary negative numeric literal
- */
-function inlineConstArrayAccesses(root: NodePath<t.Node>) {
-  root.traverse({
-    MemberExpression(path) {
-      const node = path.node;
-      if (!node.computed) return;
-      if (!t.isIdentifier(node.object)) return;
-
-      const objName = node.object.name;
-      const objBinding = path.scope.getBinding(objName);
-      if (!objBinding) return;
-
-      // Ensure the binding is a const variable declarator with an array initializer
-      const bindingPath = objBinding.path;
-      if (!bindingPath.isVariableDeclarator()) return;
-
-      // Check parent variable declaration kind is const
-      const parentDecl = bindingPath.parentPath;
-      if (!parentDecl || !parentDecl.isVariableDeclaration()) return;
-      if (parentDecl.node.kind !== 'const') return;
-
-      const declarator = bindingPath.node;
-      const init = declarator.init;
-      if (!init || !t.isArrayExpression(init)) return;
-
-      // resolve numeric index (supports simple unary negative)
-      let idx: number | null = null;
-      if (t.isNumericLiteral(node.property)) {
-        idx = node.property.value;
-      } else if (
-        t.isUnaryExpression(node.property) &&
-        node.property.operator === '-' &&
-        t.isNumericLiteral(node.property.argument)
-      ) {
-        idx = -node.property.argument.value;
-      } else {
-        return;
-      }
-
-      // support out-of-range checks: if element undefined, skip inlining
-      const element = init.elements[idx];
-      if (!element) return;
-
-      // replace with the array element (clone to avoid reusing nodes)
-      path.replaceWith(t.cloneNode(element as t.Expression, /* deep */ true));
-    },
-  });
-}
-
-/**
  * A function that is called with >= 1 numeric/string arguments
  * and returns a string from the string array. It may also decode
  * the string with Base64 or RC4.
@@ -93,9 +35,6 @@ export class Decoder {
 
   collectCalls(): NodePath<t.CallExpression>[] {
     const calls: NodePath<t.CallExpression>[] = [];
-
-    // Inline const-array accesses inside the decoder's function scope first
-    inlineConstArrayAccesses(this.path);
 
     const literalArgument: m.Matcher<t.Expression> = m.or(
       m.binaryExpression(
@@ -129,9 +68,7 @@ export class Decoder {
 
     const binding = this.path.scope.getBinding(this.name)!;
     for (const ref of binding.referencePaths) {
-      // Also inline const-array accesses at each reference's parent scope to catch arrays declared outside
-      if (ref.parentPath) inlineConstArrayAccesses(ref.parentPath);
-
+      
       if (conditionalCall.match(ref.parent)) {
         // decode(test ? 1 : 2) -> test ? decode(1) : decode(2)
         const [replacement] = ref.parentPath!.replaceWith(
@@ -202,10 +139,6 @@ export class Decoder {
         ref.parentPath.remove();
       }
     }
-
-    // Inline const-array accesses in callee and dependency paths as well so the IIFE cloning sees literals
-    if (this.calleePath) inlineConstArrayAccesses(this.calleePath);
-    for (const dep of this.dependencyPaths) inlineConstArrayAccesses(dep);
     
     // If we have a calleePath (the actual function that does decoding) or at least the decoder function path,
     // prepare a FunctionExpression and dependency clones to inline at each call site.
@@ -259,8 +192,6 @@ export class Decoder {
     return calls;
   }
 }
-
-/* --- findDecoders: call inlineConstArrayAccesses early so decoder detection sees literal array elements --- */
 
 export interface StringArray {
   path: NodePath<t.Node>;
@@ -341,9 +272,6 @@ export function findDecoders(
 
   for (const ref of stringArray.references) {
     logger?.(`findDecoders: examining reference node type=${ref.node.type} at ${ref.node.start ?? 'unknown'}`);
-
-    // Inline const-array accesses at the reference site to make subsequent detection easier
-    if (ref.parentPath) inlineConstArrayAccesses(ref.parentPath);
 
     const fnPath = ref.findParent((p) =>
       p.isFunctionDeclaration() || p.isFunctionExpression() || p.isArrowFunctionExpression(),
