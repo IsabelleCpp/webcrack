@@ -317,7 +317,7 @@ export function findStringArray(ast: t.Node): StringArray | undefined {
       }
 
       result = {
-        path: fnBinding.path as NodePath<t.Node>,
+        path: arrayBinding!.path as NodePath<t.Node>,
         references: arrayBinding ? arrayBinding.referencePaths : [],
         originalName,
         name: varName,
@@ -325,7 +325,9 @@ export function findStringArray(ast: t.Node): StringArray | undefined {
         foundBy: 'call',
         definition: definitionString,
       };
-
+      
+      cacheBinding!.path.remove();
+      path.remove();
       path.stop();
     },
 

@@ -65,6 +65,7 @@ export default {
       stringArray.path.remove();
       rotator?.remove();
       decoders.forEach((decoder) => decoder.path.remove());
+      decoders.forEach((decoder) => decoder.calleePath!.remove());
       state.changes += 2 + decoders.length;
     }
 
