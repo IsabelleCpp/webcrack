@@ -73,6 +73,71 @@ function removeEmptyFunctionWrapper(ast: t.Node) {
   });
 }
 
+function inlineConstArrayAccesses(ast: t.Node) {
+  traverse(ast, {
+    MemberExpression(path) {
+      const node = path.node;
+      if (!node.computed) return;
+      if (!t.isIdentifier(node.object)) return;
+
+      const objName = node.object.name;
+      const objBinding = path.scope.getBinding(objName);
+      if (!objBinding) return;
+      const bindingPath = objBinding.path;
+      if (!bindingPath.isVariableDeclarator()) return;
+      const parentDecl = bindingPath.parentPath;
+      if (!parentDecl || !parentDecl.isVariableDeclaration()) return;
+      if (parentDecl.node.kind !== 'const') return;
+      const declarator = bindingPath.node;
+      const init = declarator.init;
+      if (!init || !t.isArrayExpression(init)) return;
+
+      let idx: number | null = null;
+      if (t.isNumericLiteral(node.property)) {
+        idx = node.property.value;
+      } else if (
+        t.isUnaryExpression(node.property) &&
+        node.property.operator === '-' &&
+        t.isNumericLiteral(node.property.argument)
+      ) {
+        idx = -node.property.argument.value;
+      } else {
+        return;
+      }
+
+      const element = init.elements[idx];
+      if (!element) return;
+
+      path.replaceWith(t.cloneNode(element as t.Expression, true));
+    },
+  });
+
+  traverse(ast, {
+    VariableDeclarator(path) {
+      const id = path.node.id;
+      if (!t.isIdentifier(id)) return;
+      const name = id.name;
+      const parentDecl = path.parentPath;
+      if (!parentDecl || !parentDecl.isVariableDeclaration()) return;
+      if (parentDecl.node.kind !== 'const') return;
+      const init = path.node.init;
+      if (!init || !t.isArrayExpression(init)) return;
+
+      path.scope.crawl();
+      const binding = path.scope.getBinding(name);
+
+      if (!binding || binding.referencePaths.length === 0) {
+        const declParent = parentDecl.isVariableDeclaration() ? parentDecl : null;
+        path.remove();
+        if (declParent && declParent.node && declParent.node.declarations.length === 0) {
+          declParent.remove();
+        }
+      }
+    },
+  });
+}
+
+
 export function findStringArray(ast: t.Node): StringArray | undefined {
   let result: StringArray | undefined;
 
@@ -377,6 +442,7 @@ export function findStringArray(ast: t.Node): StringArray | undefined {
   });
   
   removeEmptyFunctionWrapper(ast);
+  inlineConstArrayAccesses(ast);
 
   return result;
 }
