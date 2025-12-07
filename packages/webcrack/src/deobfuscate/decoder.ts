@@ -225,45 +225,37 @@ export class Decoder {
       }
     }
 
-    // Inline each collected call site by replacing it with an IIFE that contains the callee and dependencies
-    for (const callPath of calls) {
-      // Build a function expression from the callee function node
-      if (!calleeFnNode) {
-        // If we don't have a callee function node, skip inlining for this call
-        continue;
-      }
+  // Ensure we have the callee path/node
+  if (calleeFnPath && calleeFnNode) {
+    // Clone dependency declarations (FunctionDeclaration nodes)
+    const clonedDepDecls = clonedDependencies.map((fnDecl) =>
+      t.cloneNode(fnDecl, /* deep */ true) as t.FunctionDeclaration,
+    );
 
-      // Clone callee function as a FunctionExpression
-      const clonedCallee = t.functionExpression(
-        null,
+    // Build a new BlockStatement for the callee that starts with the cloned deps
+    const originalBody = (calleeFnNode.body as t.BlockStatement).body;
+    const newBody = t.blockStatement([...clonedDepDecls, ...originalBody]);
+
+    // Create a replacement function node that preserves flags (async/generator) and id/params
+    let replacementFn: t.FunctionDeclaration | t.FunctionExpression;
+
+    if (t.isFunctionDeclaration(calleeFnNode)) {
+      replacementFn = t.functionDeclaration(
+        // keep the same id (name)
+        calleeFnNode.id ? t.cloneNode(calleeFnNode.id, true) as t.Identifier : null,
+        // clone params
         calleeFnNode.params.map((p) => t.cloneNode(p, true) as t.Identifier | t.Pattern),
-        t.cloneNode(calleeFnNode.body, true) as t.BlockStatement,
-        false,
-        false,
+        // new body
+        newBody,
+        // generator
+        calleeFnNode.generator,
+        // async
+        calleeFnNode.async,
       );
-
-      // Insert cloned dependency function declarations at the top of the callee body so they are available as locals.
-      // We do this by creating a new BlockStatement that starts with function declarations (cloned) followed by the original body.
-      const clonedDepDecls = clonedDependencies.map((fnDecl) => {
-        // Keep as FunctionDeclaration nodes; they'll be inserted into the body as-is.
-        return t.cloneNode(fnDecl, true) as t.FunctionDeclaration;
-      });
-
-      // Ensure the function expression has a block body we can modify
-      const calleeBody = clonedCallee.body as t.BlockStatement;
-      // Prepend dependency declarations
-      calleeBody.body = [...clonedDepDecls, ...calleeBody.body];
-
-      // Build the call expression that invokes the cloned function with the original arguments
-      const iifeCall = t.callExpression(
-        clonedCallee,
-        callPath.node.arguments.map((arg) => t.cloneNode(arg, true) as t.Expression),
-      );
-
-      // Replace the original call with the IIFE call
-      callPath.replaceWith(iifeCall);
+      // Replace the original callee node in-place
+      calleeFnPath.replaceWith(replacementFn);
     }
-
+  }
     return calls;
   }
 }

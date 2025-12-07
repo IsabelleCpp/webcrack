@@ -58,8 +58,16 @@ export class VMDecoder {
     const decoderCode = decoders
       .map((decoder) => generate(decoder.path.node, generateOptions))
       .join(';\n');
+      
+    const decoderCalleeCode = decoders
+      .map((decoder) => generate(decoder.calleePath!.node, generateOptions))
+      .join(';\n');
 
-    this.setupCode = [stringArrayCode, rotatorCode, decoderCode, stringArray.definition].join(';\n');
+    const decoderCalleeDepCode = decoders
+      .map((decoder) => decoder.dependencyPaths.map((dependencyPath) => generate(dependencyPath.node, generateOptions)).join(';\n'))
+      .join(';\n');
+
+    this.setupCode = [stringArrayCode, rotatorCode, decoderCode, decoderCalleeCode, decoderCalleeDepCode, stringArray.definition].join(';\n');
   }
 
   async decode(calls: NodePath<CallExpression>[]): Promise<unknown[]> {
