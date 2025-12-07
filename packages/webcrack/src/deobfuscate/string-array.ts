@@ -13,14 +13,65 @@ const generate = require('@babel/generator').default;
 export interface StringArray {
   path: NodePath<t.Node>;
   references: NodePath<t.Node>[];
-  name: string; // e.g. '__STRING_ARRAY__'
-  originalName: string; // e.g. 'rPex3CI'
+  name: string;
+  originalName: string;
   length: number;
-  /** Optional JS source string that defines the array, e.g. `var __STRING_ARRAY__ = ["a","b"];` */
   definition?: string;
   foundBy?: 'function' | 'variable' | 'call' | 'expression';
 }
 
+function isSelfAssigningEmptyFunction(fn: t.FunctionDeclaration): boolean {
+  if (!fn.id) return false;
+  const body = fn.body;
+  if (!t.isBlockStatement(body)) return false;
+  if (body.body.length !== 1) return false;
+  const stmt = body.body[0];
+  if (!t.isExpressionStatement(stmt)) return false;
+  const expr = stmt.expression;
+  if (!t.isAssignmentExpression(expr)) return false;
+  if (!t.isIdentifier(expr.left)) return false;
+  if (expr.left.name !== fn.id.name) return false;
+  if (!t.isFunctionExpression(expr.right)) return false;
+  const rightFn = expr.right;
+  if (!t.isBlockStatement(rightFn.body)) return false;
+  if (rightFn.body.body.length !== 0) return false;
+  return true;
+}
+
+function removeEmptyFunctionWrapper(ast: t.Node) {
+  traverse(ast, {
+    FunctionDeclaration(path) {
+      const node = path.node;
+      if (!isSelfAssigningEmptyFunction(node)) return;
+      const fnName = node.id!.name;
+      const binding = path.scope.getBinding(fnName);
+      if (!binding || !binding.referencePaths || binding.referencePaths.length === 0) return;
+      for (const refPath of binding.referencePaths.slice()) {
+        const parent = refPath.parentPath;
+        if (!parent) continue;
+        if (parent.isCallExpression() && parent.node.callee === refPath.node) {
+          const callExprPath = parent as NodePath<t.CallExpression>;
+          const callParent = callExprPath.parentPath;
+          if (!callParent) continue;
+          if (callParent.isExpressionStatement()) {
+            const args = callExprPath.node.arguments;
+            const replacementStmts: t.Statement[] = [];
+            for (const arg of args) {
+              replacementStmts.push(t.expressionStatement(arg as t.Expression));
+            }
+            if (replacementStmts.length > 0) {
+              callParent.replaceWithMultiple(replacementStmts);
+            }
+          }
+        }
+      }
+      const updatedBinding = path.scope.getBinding(fnName);
+      if (!updatedBinding || updatedBinding.referencePaths.length === 0) {
+        path.remove();
+      }
+    },
+  });
+}
 
 export function findStringArray(ast: t.Node): StringArray | undefined {
   let result: StringArray | undefined;
@@ -31,7 +82,6 @@ export function findStringArray(ast: t.Node): StringArray | undefined {
     m.arrayExpression(m.arrayOf(m.or(m.stringLiteral(), undefinedMatcher))),
   );
 
-  // getStringArray = function () { return array; };
   const functionAssignment = m.assignmentExpression(
     '=',
     m.identifier(m.fromCapture(functionName)),
@@ -46,20 +96,14 @@ export function findStringArray(ast: t.Node): StringArray | undefined {
     m.variableDeclarator(arrayIdentifier, arrayExpression),
   ]);
 
-  // function getStringArray() { ... }
   const matcher = m.functionDeclaration(
     m.identifier(functionName),
     [],
     m.or(
-      // var array = ["hello", "world"];
-      // return (getStringArray = function () { return array; })();
       m.blockStatement([
         variableDeclaration,
         m.returnStatement(m.callExpression(functionAssignment)),
       ]),
-      // var array = ["hello", "world"];
-      // getStringArray = function () { return array; });
-      // return getStringArray();
       m.blockStatement([
         variableDeclaration,
         m.expressionStatement(functionAssignment),
@@ -69,21 +113,16 @@ export function findStringArray(ast: t.Node): StringArray | undefined {
   );
 
   traverse(ast, {
-    // Wrapped string array from later javascript-obfuscator versions
     FunctionDeclaration(path) {
       if (!matcher.match(path.node)) return;
-
       const arrNode = arrayExpression.current!;
       const length = arrNode.elements.length;
-      if (length === 0) return; // require non-empty
-
+      if (length === 0) return;
       const fnName = functionName.current!;
       const fnBinding = path.scope.getBinding(fnName);
       if (!fnBinding) return;
-
       const originalName = fnName;
       renameFast(fnBinding, '__STRING_ARRAY__');
-
       result = {
         path,
         references: fnBinding.referencePaths,
@@ -95,28 +134,21 @@ export function findStringArray(ast: t.Node): StringArray | undefined {
       path.stop();
     },
 
-    // Simple string array inlining (only `array[0]`, `array[1]` etc references, no rotating/decoding).
-    // May be used by older or different obfuscators
     VariableDeclaration(path) {
       if (!variableDeclaration.match(path.node)) return;
-
       const arrNode = arrayExpression.current!;
       const length = arrNode.elements.length;
-      if (length === 0) return; // require non-empty
-
+      if (length === 0) return;
       const arrIdName = arrayIdentifier.current!.name;
       const binding = path.scope.getBinding(arrIdName);
       if (!binding) return;
-
       const memberAccess = m.memberExpression(
         m.fromCapture(arrayIdentifier),
         m.numericLiteral(m.matcher((value) => value < length)),
       );
       if (!binding.referenced || !isReadonlyObject(binding, memberAccess)) return;
-
       inlineArrayElements(arrNode, binding.referencePaths);
       path.remove();
-
       result = {
         path: binding.path as NodePath<t.Node>,
         references: binding.referencePaths,
@@ -128,47 +160,96 @@ export function findStringArray(ast: t.Node): StringArray | undefined {
       path.stop();
     },
 
-    // Detect pattern where a function is declared and then invoked with assignments as args,
-    // e.g.:
-    // function GtfKkR_() { GtfKkR_ = function () {}; }
-    // GtfKkR_(c9_wyxu = {}, rPex3CI = ["...","..."]);
     CallExpression(path) {
       const callee = path.node.callee;
       if (!t.isIdentifier(callee)) return;
-
       const fnName = callee.name;
       const fnBinding = path.scope.getBinding(fnName);
       if (!fnBinding || !fnBinding.path.isFunctionDeclaration()) return;
 
       const argWithArray = path.node.arguments.find((arg) => {
-        if (!t.isAssignmentExpression(arg)) return false;
-        const right = arg.right;
-        if (!t.isArrayExpression(right)) return false;
-        return right.elements.length > 0 && right.elements.every(
-          (el) =>
-            el === null ||
-            t.isStringLiteral(el) ||
-            (t.isTemplateLiteral(el) && el.quasis.length === 1 && el.expressions.length === 0),
-        );
-      }) as t.AssignmentExpression | undefined;
+        if (t.isAssignmentExpression(arg)) {
+          const right = arg.right;
+          if (!t.isArrayExpression(right)) return false;
+          return right.elements.length > 0 && right.elements.every(
+            (el) =>
+              el === null ||
+              t.isStringLiteral(el) ||
+              (t.isTemplateLiteral(el) && el.quasis.length === 1 && el.expressions.length === 0),
+          );
+        }
+        if (t.isArrayExpression(arg)) {
+          return arg.elements.length > 0 && arg.elements.every(
+            (el) =>
+              el === null ||
+              t.isStringLiteral(el) ||
+              (t.isTemplateLiteral(el) && el.quasis.length === 1 && el.expressions.length === 0),
+          );
+        }
+        return false;
+      }) as t.AssignmentExpression | t.ArrayExpression | undefined;
 
       if (!argWithArray) return;
-      if (!t.isIdentifier(argWithArray.left)) return;
 
-      const arrayId = argWithArray.left;
-      const arr = argWithArray.right as t.ArrayExpression;
+      let arrayArg: t.ArrayExpression | undefined;
+      if (t.isAssignmentExpression(argWithArray) && t.isArrayExpression(argWithArray.right)) {
+        arrayArg = argWithArray.right;
+      } else if (t.isArrayExpression(argWithArray)) {
+        arrayArg = argWithArray;
+      } else {
+        const found = path.node.arguments.find((a) => t.isArrayExpression(a)) as t.ArrayExpression | undefined;
+        if (found) arrayArg = found;
+      }
+
+      if (!arrayArg) return;
+      const arr = arrayArg;
       const length = arr.elements.length;
       if (length === 0) return;
 
-      const originalName = arrayId.name;
-      const arrayBinding = path.scope.getBinding(arrayId.name);
+      let arrayId: t.Identifier | undefined;
+      if (t.isAssignmentExpression(argWithArray) && t.isIdentifier(argWithArray.left)) {
+        arrayId = argWithArray.left;
+      } else {
+        const idArg = path.node.arguments.find((a) => t.isIdentifier(a)) as t.Identifier | undefined;
+        if (idArg) arrayId = idArg;
+      }
+
+      const originalName = arrayId ? arrayId.name : '__STRING_ARRAY__';
+      const arrayBinding = arrayId ? path.scope.getBinding(originalName) : null;
       if (arrayBinding) renameFast(arrayBinding, '__STRING_ARRAY__');
 
-      // Generate a JS source string for the array expression and build a variable definition
-      // that assigns it to __STRING_ARRAY__ (this is what you'll inject into your VM).
-      const arrayCode = generate(arr).code; // e.g. '["a","b","c"]' or '[,"a",`b`]'
+      let cacheOriginal: string | undefined;
+      let cacheBinding: any = null;
+
+      for (const arg of path.node.arguments) {
+        if (t.isAssignmentExpression(arg)) {
+          if (t.isObjectExpression(arg.right) && arg.right.properties.length === 0 && t.isIdentifier(arg.left)) {
+            cacheOriginal = arg.left.name;
+            cacheBinding = path.scope.getBinding(cacheOriginal);
+            if (cacheBinding) renameFast(cacheBinding, '__STRING_ARRAY_CACHE__');
+            break;
+          }
+        } else if (t.isIdentifier(arg)) {
+          const b = path.scope.getBinding(arg.name);
+          if (b && b.path.isVariableDeclarator()) {
+            const init = (b.path.node as t.VariableDeclarator).init;
+            if (t.isObjectExpression(init) && init.properties.length === 0) {
+              cacheOriginal = arg.name;
+              cacheBinding = b;
+              renameFast(cacheBinding, '__STRING_ARRAY_CACHE__');
+              break;
+            }
+          }
+        }
+      }
+
+      const arrayCode = generate(arr).code;
       const varName = '__STRING_ARRAY__';
-      const definitionString = `var ${varName} = ${arrayCode};`;
+      let definitionString = `var ${varName} = ${arrayCode};`;
+      if (cacheOriginal) {
+        const cacheVar = '__STRING_ARRAY_CACHE__';
+        definitionString = `var ${cacheVar} = {}; ${definitionString}`;
+      }
 
       result = {
         path: fnBinding.path as NodePath<t.Node>,
@@ -177,58 +258,68 @@ export function findStringArray(ast: t.Node): StringArray | undefined {
         name: varName,
         length,
         foundBy: 'call',
-        // string containing the variable definition you can feed into a VM to recreate the array
         definition: definitionString,
       };
 
       path.stop();
     },
 
-    // NEW: handle standalone assignment or sequence of assignments like:
-    // c9_wyxu = {}, rPex3CI = ["...","..."];
     ExpressionStatement(path) {
       const expr = path.node.expression;
-
-      // collect assignment expressions from either a single assignment or a sequence
-      const assignments: t.AssignmentExpression[] = [];
-      if (t.isAssignmentExpression(expr)) assignments.push(expr);
-      else if (t.isSequenceExpression(expr)) {
-        for (const e of expr.expressions) {
-          if (t.isAssignmentExpression(e)) assignments.push(e);
-        }
+      const exprs: t.Expression[] = [];
+      if (t.isSequenceExpression(expr)) {
+        for (const e of expr.expressions) exprs.push(e);
       } else {
-        return;
+        exprs.push(expr);
       }
 
-      // find an assignment whose right side is an array of strings/holes and non-empty
-      const arrAssign = assignments.find((a) => {
-        const right = a.right;
-        if (!t.isArrayExpression(right)) return false;
-        return right.elements.length > 0 && right.elements.every(
-          (el) =>
-            el === null ||
-            t.isStringLiteral(el) ||
-            (t.isTemplateLiteral(el) && el.quasis.length === 1 && el.expressions.length === 0),
-        );
-      });
+      const arrExpr = exprs.find((e) => {
+        if (t.isAssignmentExpression(e) && t.isArrayExpression(e.right)) {
+          const right = e.right;
+          return right.elements.length > 0 && right.elements.every(
+            (el) =>
+              el === null ||
+              t.isStringLiteral(el) ||
+              (t.isTemplateLiteral(el) && el.quasis.length === 1 && el.expressions.length === 0),
+          );
+        }
+        if (t.isArrayExpression(e)) {
+          const right = e;
+          return right.elements.length > 0 && right.elements.every(
+            (el) =>
+              el === null ||
+              t.isStringLiteral(el) ||
+              (t.isTemplateLiteral(el) && el.quasis.length === 1 && el.expressions.length === 0),
+          );
+        }
+        return false;
+      }) as t.Expression | undefined;
 
-      if (!arrAssign) return;
-      if (!t.isIdentifier(arrAssign.left)) return;
+      if (!arrExpr) return;
 
-      const arrayId = arrAssign.left;
-      const arr = arrAssign.right as t.ArrayExpression;
+      let arrayId: t.Identifier | undefined;
+      if (t.isAssignmentExpression(arrExpr) && t.isIdentifier(arrExpr.left)) {
+        arrayId = arrExpr.left;
+      } else {
+        const idExpr = exprs.find((e) => t.isIdentifier(e)) as t.Identifier | undefined;
+        if (idExpr) arrayId = idExpr;
+      }
+
+      const arr = t.isAssignmentExpression(arrExpr) && t.isArrayExpression(arrExpr.right)
+        ? arrExpr.right
+        : (t.isArrayExpression(arrExpr) ? arrExpr : undefined);
+
+      if (!arr) return;
       const length = arr.elements.length;
-      if (length === 0) return; // require non-empty
+      if (length === 0) return;
 
-      const originalName = arrayId.name;
-      const arrayBinding = path.scope.getBinding(arrayId.name);
+      const originalName = arrayId ? arrayId.name : '__STRING_ARRAY__';
+      const arrayBinding = arrayId ? path.scope.getBinding(originalName) : null;
       if (arrayBinding) {
         renameFast(arrayBinding, '__STRING_ARRAY__');
-
         const anchorPath = arrayBinding.path.isVariableDeclarator()
           ? (arrayBinding.path as NodePath<t.Node>)
           : path;
-
         result = {
           path: anchorPath,
           references: arrayBinding.referencePaths,
@@ -238,7 +329,6 @@ export function findStringArray(ast: t.Node): StringArray | undefined {
           foundBy: 'expression',
         };
       } else {
-        // implicit global assignment: no binding available
         result = {
           path,
           references: [],
@@ -249,9 +339,44 @@ export function findStringArray(ast: t.Node): StringArray | undefined {
         };
       }
 
+      let cacheOriginal: string | undefined;
+      let cacheBinding: any = null;
+
+      for (const e of exprs) {
+        if (t.isAssignmentExpression(e)) {
+          if (t.isObjectExpression(e.right) && e.right.properties.length === 0 && t.isIdentifier(e.left)) {
+            cacheOriginal = e.left.name;
+            cacheBinding = path.scope.getBinding(cacheOriginal);
+            if (cacheBinding) renameFast(cacheBinding, '__STRING_ARRAY_CACHE__');
+            break;
+          }
+        } else if (t.isIdentifier(e)) {
+          const b = path.scope.getBinding(e.name);
+          if (b && b.path.isVariableDeclarator()) {
+            const init = (b.path.node as t.VariableDeclarator).init;
+            if (t.isObjectExpression(init) && init.properties.length === 0) {
+              cacheOriginal = e.name;
+              cacheBinding = b;
+              renameFast(cacheBinding, '__STRING_ARRAY_CACHE__');
+              break;
+            }
+          }
+        }
+      }
+
+      if (cacheOriginal) {
+        const arrayCode = generate(arr).code;
+        const varName = '__STRING_ARRAY__';
+        const cacheVar = '__STRING_ARRAY_CACHE__';
+        const definitionString = `var ${cacheVar} = {}; var ${varName} = ${arrayCode};`;
+        if (result) result.definition = definitionString;
+      }
+
       path.stop();
     },
   });
+  
+  removeEmptyFunctionWrapper(ast);
 
   return result;
 }
