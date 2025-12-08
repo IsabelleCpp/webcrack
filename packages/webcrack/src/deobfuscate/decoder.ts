@@ -417,48 +417,19 @@ export function findDecoders(
 
     const oldName = getFunctionName(fnPath);
     const newName = `__DECODE_${decoders.length}__`;
-
-    if (oldName) {
-      const binding = fnPath.scope.getBinding(oldName);
-      if (binding) {
-        logger?.(`findDecoders: renaming decoder ${oldName} -> ${newName}`);
-        renameFast(binding, newName);
-
-        let calleePathToStore: NodePath<t.FunctionDeclaration> | null = null;
-        if (decoderCalleeName) {
-          const calleeBinding = fnPath.scope.getBinding(decoderCalleeName);
-          if (calleeBinding && calleeBinding.path && calleeBinding.path.isFunctionDeclaration()) {
-            const calleeOldName = decoderCalleeName;
-            const calleeNewName = `__DECODE_CALLEE_${decoders.length}__`;
-            logger?.(`findDecoders: renaming callee ${calleeOldName} -> ${calleeNewName}`);
-            renameFast(calleeBinding, calleeNewName);
-            calleePathToStore = calleeBinding.path as NodePath<t.FunctionDeclaration>;
-          }
-        }
-
-        const depPathsToStore: NodePath<t.FunctionDeclaration>[] = [];
-        for (const dep of dependencyPaths) {
-          if (dep && dep.node && t.isFunctionDeclaration(dep.node) && dep.node.id && t.isIdentifier(dep.node.id)) {
-            const depBinding = dep.scope.getBinding(dep.node.id.name);
-            if (depBinding) {
-              const depNewName = `__DECODE_INTERNAL_DEP__`;
-              logger?.(`findDecoders: renaming dependency ${dep.node.id.name} -> ${depNewName}`);
-              renameFast(depBinding, depNewName);
-              const updated = dep.scope.getBinding(depNewName);
-              if (updated && updated.path && updated.path.isFunctionDeclaration()) {
-                depPathsToStore.push(updated.path as NodePath<t.FunctionDeclaration>);
-              }
-            }
-          }
-        }
-
-        decoders.push(new Decoder(oldName, newName, fnPath as NodePath<t.FunctionDeclaration>, calleePathToStore, depPathsToStore));
-        continue;
-      }
-    }
-
     const fallbackOldName = oldName ?? decoderCalleeName ?? `decoder_${decoders.length}`;
-    logger?.(`findDecoders: pushing decoder (fallback name) ${fallbackOldName} -> ${newName}`);
+
+    const fnBindingName =
+      oldName ??
+      (fnPath.node && t.isFunctionDeclaration(fnPath.node) && fnPath.node.id && t.isIdentifier(fnPath.node.id)
+        ? fnPath.node.id.name
+        : undefined);
+
+    const fnBinding = fnBindingName ? fnPath.scope.getBinding(fnBindingName) : null;
+    if (fnBinding) {
+      logger?.(`findDecoders: renaming decoder ${fnBindingName} -> ${newName}`);
+      renameFast(fnBinding, newName);
+    }
 
     let calleePathToStore: NodePath<t.FunctionDeclaration> | null = null;
     if (decoderCalleeName) {
@@ -491,7 +462,12 @@ export function findDecoders(
       }
     }
 
-    decoders.push(new Decoder(fallbackOldName, newName, fnPath as NodePath<t.FunctionDeclaration>, calleePathToStore, depPathsToStore));
+    logger?.(`findDecoders: pushing decoder ${fallbackOldName} -> ${newName}`);
+    decoders.push(
+      new Decoder(fallbackOldName, newName, fnPath as NodePath<t.FunctionDeclaration>, calleePathToStore, depPathsToStore)
+    );
+    continue;
+
   } // end for references
 
   logger?.(`findDecoders: finished; found ${decoders.length} decoder(s)`);
