@@ -134,6 +134,128 @@ function inlineConstArrayAccesses(ast: t.Node) {
   });
 }
 
+function hoistConditionalAssignedFunctions(ast: t.Node) {
+  traverse(ast, {
+    Function(path) {
+      const fnNode = path.node as t.FunctionDeclaration | t.FunctionExpression | t.ArrowFunctionExpression;
+      if (!fnNode.body || !t.isBlockStatement(fnNode.body)) return;
+
+      // Map param name -> info { paramIndex, ifPath, funcExpr }
+      const candidates: {
+        [name: string]: {
+          paramIndex: number;
+          ifPath: NodePath<t.IfStatement>;
+          funcExpr: t.FunctionExpression | t.ArrowFunctionExpression;
+        };
+      } = {};
+
+      // Build a quick lookup of parameter names and their indices
+      const paramNameToIndex = new Map<string, number>();
+      fnNode.params.forEach((p, i) => {
+        if (t.isIdentifier(p)) paramNameToIndex.set(p.name, i);
+      });
+      if (paramNameToIndex.size === 0) return;
+
+      // Walk direct children statements of the function body to find matching if-statements
+      const bodyStatements = path.get('body').get('body') as NodePath<t.Statement>[];
+
+      for (const stmtPath of bodyStatements) {
+        if (!stmtPath.isIfStatement()) continue;
+        const ifNode = stmtPath.node;
+
+        // Check condition is `!IDENTIFIER`
+        if (!t.isUnaryExpression(ifNode.test) || ifNode.test.operator !== '!' || !t.isIdentifier(ifNode.test.argument)) {
+          continue;
+        }
+        const idName = ifNode.test.argument.name;
+        // Must be a parameter
+        if (!paramNameToIndex.has(idName)) continue;
+
+        // Check consequent is a block with single assignment `IDENTIFIER = function(...) { ... };`
+        const cons = ifNode.consequent;
+        if (!t.isBlockStatement(cons) || cons.body.length !== 1) continue;
+        const onlyStmt = cons.body[0];
+
+        // Accept either ExpressionStatement with AssignmentExpression or VariableDeclaration assigning to identifier
+        if (!t.isExpressionStatement(onlyStmt)) continue;
+        const expr = onlyStmt.expression;
+        if (!t.isAssignmentExpression(expr) || expr.operator !== '=') continue;
+        if (!t.isIdentifier(expr.left) || expr.left.name !== idName) continue;
+
+        // Right side must be a FunctionExpression or ArrowFunctionExpression
+        if (!(t.isFunctionExpression(expr.right) || t.isArrowFunctionExpression(expr.right))) continue;
+
+        // Candidate found
+        candidates[idName] = {
+          paramIndex: paramNameToIndex.get(idName)!,
+          ifPath: stmtPath as NodePath<t.IfStatement>,
+          funcExpr: expr.right as t.FunctionExpression | t.ArrowFunctionExpression,
+        };
+      }
+
+      // If no candidates, nothing to do
+      if (Object.keys(candidates).length === 0) return;
+
+      // Sort param indices descending so removal doesn't shift earlier indices
+      const indicesToRemove = Object.values(candidates)
+        .map((c) => c.paramIndex)
+        .sort((a, b) => b - a);
+
+      // Remove parameters from function signature
+      for (const idx of indicesToRemove) {
+        fnNode.params.splice(idx, 1);
+      }
+
+      // For each candidate, create a FunctionDeclaration and insert it at the top of the function body
+      // Keep original function expression's id as the identifier name (use the param name)
+      const hoistedDecls: t.FunctionDeclaration[] = [];
+      for (const name of Object.keys(candidates)) {
+        const { funcExpr, ifPath } = candidates[name];
+
+        // Convert ArrowFunctionExpression to FunctionExpression if needed
+        let body: t.BlockStatement;
+        let params: t.Identifier[] = [];
+        if (t.isArrowFunctionExpression(funcExpr)) {
+          // Ensure arrow body is a block
+          if (t.isBlockStatement(funcExpr.body)) {
+            body = funcExpr.body;
+          } else {
+            // expression body -> wrap in return
+            body = t.blockStatement([t.returnStatement(funcExpr.body as t.Expression)]);
+          }
+          params = funcExpr.params.map((p) => (t.isIdentifier(p) ? p : t.identifier('arg')));
+        } else {
+          body = funcExpr.body;
+          params = funcExpr.params.map((p) => (t.isIdentifier(p) ? p : t.identifier('arg')));
+        }
+
+        // Create a FunctionDeclaration with the param name
+        const funcDecl = t.functionDeclaration(t.identifier(name), params, body, false, false);
+
+        hoistedDecls.push(funcDecl);
+
+        // Remove the original if-statement
+        ifPath.remove();
+      }
+
+      // Insert hoisted declarations at the top of the function body (preserve original order)
+      if (hoistedDecls.length > 0) {
+        // Narrow the body path to a BlockStatement path
+        const bodyPath = path.get('body') as NodePath<t.BlockStatement>;
+
+        // Insert in reverse so the first candidate ends up first in the body
+        for (let i = hoistedDecls.length - 1; i >= 0; i--) {
+          // cast the container key to any to satisfy TS
+          (bodyPath as any).unshiftContainer('body', hoistedDecls[i]);
+        }
+      }
+
+      // Re-crawl scope so bindings are updated
+      path.scope.crawl();
+    },
+  });
+}
+
 function getGlobalDefinitionsIncludingLaterAssignments(ast: t.Node): string {
   const defs: Map<string, t.Node> = new Map();
   const orderedKeys: string[] = [];
@@ -595,7 +717,7 @@ export function findStringArray(ast: t.Node): StringArray | undefined {
   
   removeEmptyFunctionWrapper(ast);
   inlineConstArrayAccesses(ast);
-
+  hoistConditionalAssignedFunctions(ast);
   // const globalDefs = getGlobalDefinitionsIncludingLaterAssignments(ast);
   // if (globalDefs && globalDefs.trim().length && result) {
   //   result.definition += '\n\n' + globalDefs;
