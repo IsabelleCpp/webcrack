@@ -66,6 +66,7 @@ export default {
       rotator?.remove();
       decoders.forEach((decoder) => decoder.path.remove());
       decoders.forEach((decoder) => decoder.calleePath!.remove());
+      decoders[0].dependencyPaths[0].remove();
       state.changes += 2 + decoders.length;
     }
 
