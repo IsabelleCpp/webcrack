@@ -417,19 +417,24 @@ export function findDecoders(
 
     const oldName = getFunctionName(fnPath);
     const newName = `__DECODE_${decoders.length}__`;
-    const fallbackOldName = oldName ?? decoderCalleeName ?? `decoder_${decoders.length}`;
-
-    const fnBindingName =
-      oldName ??
-      (fnPath.node && t.isFunctionDeclaration(fnPath.node) && fnPath.node.id && t.isIdentifier(fnPath.node.id)
-        ? fnPath.node.id.name
-        : undefined);
-
-    const fnBinding = fnBindingName ? fnPath.scope.getBinding(fnBindingName) : null;
-    if (fnBinding) {
-      logger?.(`findDecoders: renaming decoder ${fnBindingName} -> ${newName}`);
-      renameFast(fnBinding, newName);
+    
+    if (oldName) {
+      let scope = fnPath.scope;
+      let hoistedBinding = null;
+      while (scope) {
+        const b = scope.bindings && scope.bindings[oldName];
+        if (b && (b.kind === "hoisted" || (b.path && b.path.isFunctionDeclaration && b.path.isFunctionDeclaration()))) {
+          hoistedBinding = b;
+          break;
+        }
+        scope = scope.parent;
+      }
+      if (hoistedBinding) {
+        logger?.(`findDecoders: renaming decoder ${oldName} -> ${newName}`);
+        renameFast(hoistedBinding, newName);
+      }
     }
+
 
     let calleePathToStore: NodePath<t.FunctionDeclaration> | null = null;
     if (decoderCalleeName) {
@@ -462,9 +467,9 @@ export function findDecoders(
       }
     }
 
-    logger?.(`findDecoders: pushing decoder ${fallbackOldName} -> ${newName}`);
+    logger?.(`findDecoders: pushing decoder ${oldName} -> ${newName}`);
     decoders.push(
-      new Decoder(fallbackOldName, newName, fnPath as NodePath<t.FunctionDeclaration>, calleePathToStore, depPathsToStore)
+      new Decoder(oldName!, newName, fnPath as NodePath<t.FunctionDeclaration>, calleePathToStore, depPathsToStore)
     );
     continue;
 
