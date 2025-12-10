@@ -14,6 +14,7 @@ import { findDecoders } from './decoder';
 import inlineDecodedStrings from './inline-decoded-strings';
 import inlineDecoderWrappers from './inline-decoder-wrappers';
 import inlineObjectProps from './inline-object-props';
+import obfNameDumper from './obf-name-dumper';
 import { findStringArray } from './string-array';
 import type { Sandbox } from './vm';
 import { VMDecoder, createBrowserSandbox, createNodeSandbox } from './vm';
@@ -72,7 +73,7 @@ export default {
 
     state.changes += applyTransforms(
       ast,
-      [mergeStrings, deadCode, controlFlowObject, controlFlowSwitch],
+      [mergeStrings, deadCode, controlFlowObject, controlFlowSwitch, obfNameDumper],
       { noScope: true },
     ).changes;
   },
