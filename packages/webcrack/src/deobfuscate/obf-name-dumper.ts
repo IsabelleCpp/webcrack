@@ -1,3 +1,4 @@
+import generate from '@babel/generator';
 import * as t from '@babel/types';
 import * as m from '@codemod/matchers';
 import debug from 'debug';
@@ -45,6 +46,9 @@ export default {
   visitor() {
     const patterns: PatternDef[] = [];
 
+    // -------------------------
+    // Original physics pattern
+    // -------------------------
     const physicsId = m.capture<t.Identifier>(m.identifier());
     const physicsMember = memberCapture(physicsId);
     const physicsBinary = binaryLtSmall(physicsMember);
@@ -85,6 +89,59 @@ export default {
       },
     });
 
+    // -------------------------------------------------------
+    // NEW: sample pattern (robust) for guaranteed detection
+    // Accepts both obj.prop and obj["prop"] forms and normalizes
+    // -------------------------------------------------------
+    const sampleId = m.capture<t.Identifier>(m.identifier());
+    const sampleStr = m.capture<t.StringLiteral>(m.stringLiteral());
+
+    // matcher that accepts either non-computed Identifier property or computed StringLiteral property
+    const sampleMemberEither = m.matcher<t.MemberExpression>((node) => {
+      if (!t.isMemberExpression(node)) return false;
+      // non-computed property like obj.prop
+      if (!node.computed && t.isIdentifier(node.property)) {
+        return sampleId.match(node.property as any);
+      }
+      // computed property like obj["prop"]
+      if (node.computed && t.isStringLiteral(node.property)) {
+        return sampleStr.match(node.property as any);
+      }
+      return false;
+    }) as any;
+
+    const sampleBinary = binaryLtSmall(sampleMemberEither);
+
+    patterns.push({
+      name: 'sample',
+      capture: sampleId, // primary capture is Identifier; sampleStr is handled separately
+      predicate(node: t.Node) {
+        if (t.isIfStatement(node)) {
+          const test = node.test;
+          if (sampleBinary.match(test as any)) {
+            logger('predicate sample matched on IfStatement test (direct binary)', {});
+            return true;
+          }
+          if (t.isLogicalExpression(test) && test.operator === '&&') {
+            if (sampleBinary.match(test.left as any) || sampleBinary.match(test.right as any)) {
+              logger('predicate sample matched on IfStatement test (logical &&)', {});
+              return true;
+            }
+          }
+          if (contains(test, sampleBinary)) {
+            logger('predicate sample matched on IfStatement test (contains binary)', {});
+            return true;
+          }
+        } else {
+          if (contains(node, sampleBinary)) {
+            logger('predicate sample matched by contains', { nodeType: node.type });
+            return true;
+          }
+        }
+        return false;
+      },
+    });
+
     const discovered = new Map<string, string>();
 
     return {
@@ -109,7 +166,9 @@ export default {
         },
       },
 
+      // Keep the original BinaryExpression handler but augment it with a direct sample check
       BinaryExpression(path) {
+        // Run existing pattern checks (keeps original behavior)
         for (const p of patterns) {
           try {
             if (p.predicate(path.parent as any)) {
@@ -126,15 +185,50 @@ export default {
             logger('error while evaluating predicate for BinaryExpression', { pattern: p.name, error: (err as Error).message });
           }
         }
+
+        // --- DIRECT sampleBinary check for guaranteed detection while debugging ---
+        try {
+          if (sampleBinary.match(path.node as any)) {
+            // produce source for the matched BinaryExpression using generate directly
+            const matchedCode = generate(path.node).code;
+            // left side and property source (if left is MemberExpression)
+            let leftCode = '';
+            let propCode = '';
+            const left = path.node.left;
+            if (t.isMemberExpression(left)) {
+              leftCode = generate(left).code;
+              const prop = left.property;
+              propCode = prop ? generate(prop).code : '';
+            } else {
+              leftCode = generate(left).code;
+            }
+
+            // prefer Identifier capture if present
+            if (sampleId.current && !discovered.has('sample')) {
+              discovered.set('sample', sampleId.current.name);
+              logger('direct BinaryExpression match captured sample Identifier', { obf: sampleId.current.name, matchedCode, leftCode, propCode });
+            } else if (sampleStr.current && !discovered.has('sample')) {
+              // normalize string literal capture to its value
+              discovered.set('sample', sampleStr.current.value);
+              logger('direct BinaryExpression match captured sample StringLiteral', { obf: sampleStr.current.value, matchedCode, leftCode, propCode });
+            } else {
+              logger('direct BinaryExpression match but no capture available', { matchedCode, leftCode, propCode });
+            }
+          }
+        } catch (err) {
+          logger('error during direct sample BinaryExpression check', { error: (err as Error).message });
+        }
       },
 
       Program: {
         exit(path) {
           logger('program exit, discovered map size', { size: discovered.size });
+
           if (discovered.size === 0) {
             logger('no obfuscated names discovered, exiting without changes');
             return;
           }
+
           const props: t.ObjectProperty[] = [];
           for (const [readable, obf] of discovered) {
             logger('adding property to __obf_names object', { readable, obf });

@@ -19,6 +19,7 @@ import deobfuscate, {
 import debugProtection from './deobfuscate/debug-protection';
 import evaluateGlobals from './deobfuscate/evaluate-globals';
 import mergeObjectAssignments from './deobfuscate/merge-object-assignments';
+import obfNameDumper from './deobfuscate/obf-name-dumper';
 import selfDefending from './deobfuscate/self-defending';
 import varFunctions from './deobfuscate/var-functions';
 import {
@@ -117,7 +118,7 @@ function mergeOptions(options: Options): asserts options is Required<Options> {
     mangle: false,
     plugins: options.plugins ?? {},
     mappings: () => ({}),
-    onProgress: () => {},
+    onProgress: () => { },
     sandbox: isBrowser() ? createBrowserSandbox() : createNodeSandbox(),
     ...options,
   };
@@ -173,41 +174,46 @@ export async function webcrack(
       );
     },
     plugins.afterPrepare &&
-      (() => runPlugins(ast, plugins.afterPrepare!, state)),
+    (() => runPlugins(ast, plugins.afterPrepare!, state)),
 
     options.deobfuscate &&
-      (() => applyTransformAsync(ast, deobfuscate, options.sandbox)),
+    (() => applyTransformAsync(ast, deobfuscate, options.sandbox)),
     plugins.afterDeobfuscate &&
-      (() => runPlugins(ast, plugins.afterDeobfuscate!, state)),
+    (() => runPlugins(ast, plugins.afterDeobfuscate!, state)),
 
     options.unminify &&
-      (() => {
-        applyTransforms(ast, [transpile, unminify]);
-      }),
+    (() => {
+      applyTransforms(ast, [transpile, unminify]);
+    }),
     plugins.afterUnminify &&
-      (() => runPlugins(ast, plugins.afterUnminify!, state)),
+    (() => runPlugins(ast, plugins.afterUnminify!, state)),
 
     options.mangle &&
-      (() =>
-        applyTransform(
-          ast,
-          mangle,
-          typeof options.mangle === 'boolean' ? () => true : options.mangle,
-        )),
+    (() =>
+      applyTransform(
+        ast,
+        mangle,
+        typeof options.mangle === 'boolean' ? () => true : options.mangle,
+      )),
     // TODO: Also merge unminify visitor (breaks selfDefending/debugProtection atm)
     (options.deobfuscate || options.jsx) &&
-      (() => {
-        applyTransforms(
-          ast,
-          [
-            // Have to run this after unminify to properly detect it
-            options.deobfuscate ? [selfDefending, debugProtection] : [],
-            options.jsx ? [jsx, jsxNew] : [],
-          ].flat(),
-        );
-      }),
+    (() => {
+      applyTransforms(
+        ast,
+        [
+          // Have to run this after unminify to properly detect it
+          options.deobfuscate ? [selfDefending, debugProtection] : [],
+          options.jsx ? [jsx, jsxNew] : [],
+        ].flat(),
+      );
+    }),
     options.deobfuscate &&
-      (() => applyTransforms(ast, [mergeObjectAssignments, evaluateGlobals])),
+    (() => applyTransforms(ast, [mergeObjectAssignments, evaluateGlobals])),
+    (() =>
+      applyTransform(
+        ast,
+        obfNameDumper,
+      )),
     () => (outputCode = generate(ast)),
     // Unpacking modifies the same AST and may result in imports not at top level
     // so the code has to be generated before
