@@ -73,8 +73,10 @@ export default {
 
     state.changes += applyTransforms(
       ast,
-      [mergeStrings, deadCode, controlFlowObject, controlFlowSwitch, obfNameDumper],
+      [mergeStrings, deadCode, controlFlowObject, controlFlowSwitch],
       { noScope: true },
     ).changes;
+
+    state.changes += applyTransform(ast, obfNameDumper).changes;
   },
 } satisfies AsyncTransform<Sandbox>;
