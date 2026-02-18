@@ -303,6 +303,45 @@ export default {
       return false;
     });
 
+    const collisionAABBId = register('collisionAABB', (node: t.Node) => {
+      let left: t.Node | null = null;
+      let right: t.Node | null = null;
+
+      if (t.isAssignmentExpression(node)) {
+        left = node.left;
+        right = node.right;
+      } else if (t.isExpressionStatement(node) && t.isAssignmentExpression(node.expression)) {
+        left = node.expression.left;
+        right = node.expression.right;
+      } else {
+        return false;
+      }
+
+      if (!left || !t.isMemberExpression(left)) return false;
+      if (left.computed) return false;
+      if (!t.isThisExpression(left.object)) return false;
+      if (!t.isIdentifier(left.property) || left.property.name !== 'floor') return false;
+
+      if (!right || !t.isMemberExpression(right)) return false;
+      if (right.computed) return false;
+
+      const rightProp = right.property;
+      const rightObj = right.object;
+      if (!t.isMemberExpression(rightObj)) return false;
+      if (rightObj.computed) return false;
+      if (!t.isIdentifier(rightObj.property) || rightObj.property.name !== 'max') return false;
+
+      const innerObj = rightObj.object;
+      if (!t.isMemberExpression(innerObj)) return false;
+      if (innerObj.computed) return false;
+      if (!t.isThisExpression(innerObj.object)) return false;
+      if (!t.isIdentifier(innerObj.property)) return false;
+
+      collisionAABBId.match(innerObj.property as any);
+      return true;
+    });
+
+
     const discovered = new Map<string, string>();
 
     function tryCapture(node: t.Node) {
