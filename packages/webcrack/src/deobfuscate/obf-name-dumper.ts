@@ -110,10 +110,14 @@ export default {
               if (idCap && idCap.current) {
                 const name = idCap.current.name;
                 if (!discovered.has(p.name)) discovered.set(p.name, name);
+              } else {
+                logger('error', { message: 'pattern matched but capture empty', pattern: p.name });
               }
             }
           }
-        } catch { }
+        } catch (err) {
+          logger('error', { message: 'error while processing AssignmentExpression', error: err });
+        }
       },
 
       ExpressionStatement(path) {
@@ -124,31 +128,51 @@ export default {
               if (idCap && idCap.current) {
                 const name = idCap.current.name;
                 if (!discovered.has(p.name)) discovered.set(p.name, name);
+              } else {
+                logger('error', { message: 'pattern matched but capture empty', pattern: p.name });
               }
             }
           }
-        } catch { }
+        } catch (err) {
+          logger('error', { message: 'error while processing ExpressionStatement', error: err });
+        }
       },
 
       Program: {
         exit(path) {
-          if (discovered.size === 0) {
-            logger('result', { discovered: {} });
-            return;
+          try {
+            // Log any patterns that were not discovered
+            const missing: string[] = [];
+            for (const p of patterns) {
+              if (!discovered.has(p.name)) missing.push(p.name);
+            }
+
+            if (missing.length > 0) {
+              // All patterns should be found; log an error with the missing list
+              logger('error', { message: 'missing patterns', missing });
+            }
+
+            if (discovered.size === 0) {
+              logger('result', { discovered: {} });
+              return;
+            }
+
+            const props: t.ObjectProperty[] = [];
+            const resultObj: Record<string, string> = {};
+            for (const [readable, obf] of discovered) {
+              props.push(t.objectProperty(t.identifier(readable), t.stringLiteral(obf)));
+              resultObj[readable] = obf;
+            }
+            const decl = t.variableDeclaration('const', [
+              t.variableDeclarator(t.identifier('__obf_names'), t.objectExpression(props)),
+            ]);
+            path.node.body.push(decl);
+            logger('result', { discovered: resultObj });
+            // @ts-ignore
+            if (typeof this.changes === 'number') this.changes += 1;
+          } catch (err) {
+            logger('error', { message: 'error in Program.exit', error: err });
           }
-          const props: t.ObjectProperty[] = [];
-          const resultObj: Record<string, string> = {};
-          for (const [readable, obf] of discovered) {
-            props.push(t.objectProperty(t.identifier(readable), t.stringLiteral(obf)));
-            resultObj[readable] = obf;
-          }
-          const decl = t.variableDeclaration('const', [
-            t.variableDeclarator(t.identifier('__obf_names'), t.objectExpression(props)),
-          ]);
-          path.node.body.push(decl);
-          logger('result', { discovered: resultObj });
-          // @ts-ignore
-          if (typeof this.changes === 'number') this.changes += 1;
         },
       },
     };
