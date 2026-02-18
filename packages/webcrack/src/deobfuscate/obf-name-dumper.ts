@@ -34,9 +34,6 @@ export default {
       patterns.push({ name, captureId, predicate });
     }
 
-    //
-    // __vue__ pattern (unchanged)
-    //
     const vueId = m.capture<t.Identifier>(m.identifier());
     const vueMemberMatcher = m.matcher<t.MemberExpression>((node) => {
       if (!t.isMemberExpression(node)) return false;
@@ -61,12 +58,8 @@ export default {
       return contains(node, vueMemberMatcher);
     });
 
-    //
-    // _modules pattern: strict, direct AST inspection to match the sample shape
-    //
     const modulesId = m.capture<t.Identifier>(m.identifier());
 
-    // --- small recursive walker used by the direct checks
     function walk(node: t.Node | null | undefined, cb: (n: t.Node) => void) {
       if (!node) return;
       cb(node);
@@ -100,7 +93,6 @@ export default {
         walk(node.consequent as any, cb);
         walk(node.alternate as any, cb);
       } else if (t.isUnaryExpression(node) || t.isBinaryExpression(node) || t.isLogicalExpression(node)) {
-        // conservative handling
         // @ts-ignore
         walk((node as any).left ?? (node as any).argument, cb);
         // @ts-ignore
@@ -113,7 +105,6 @@ export default {
       } else if (t.isArrayExpression(node)) {
         for (const e of node.elements) walk(e as any, cb);
       } else {
-        // fallback: iterate over object properties that look like nodes
         for (const key of Object.keys(node as any)) {
           const val = (node as any)[key];
           if (Array.isArray(val)) {
@@ -125,7 +116,6 @@ export default {
       }
     }
 
-    // Strict prototype-left check: y.prototype.<id> (non-computed)
     function isPrototypeLeft(node: t.Node): node is t.MemberExpression {
       if (!t.isMemberExpression(node)) return false;
       const obj = node.object;
@@ -137,19 +127,16 @@ export default {
       return true;
     }
 
-    // Find the first identifier name used as this.<id> inside a function body where the usage is this.<id>.something
     function findThisInnerIdentifier(body: t.Node): string | null {
       let found: string | null = null;
       walk(body, (n) => {
         if (found) return;
         if (!t.isMemberExpression(n)) return;
-        // shape: (this.<id>).<something>  => n.object is MemberExpression whose object is ThisExpression
         const obj = n.object;
         if (t.isMemberExpression(obj) && t.isThisExpression(obj.object) && !obj.computed && t.isIdentifier(obj.property)) {
           found = obj.property.name;
           return;
         }
-        // also accept direct this.<id> (in case it's used directly)
         if (t.isThisExpression(n.object) && !n.computed && t.isIdentifier(n.property)) {
           found = n.property.name;
           return;
@@ -158,7 +145,6 @@ export default {
       return found;
     }
 
-    // Find a call like C(this, true) where callee is an Identifier and args[0] === this and args[1] === true
     function hasThisTrueCall(body: t.Node): boolean {
       let ok = false;
       walk(body, (n) => {
@@ -175,12 +161,9 @@ export default {
       return ok;
     }
 
-    // Register the strict _modules pattern using direct AST inspection
     addPattern('_modules', modulesId, (node: t.Node) => {
-      // accept raw AssignmentExpression or ExpressionStatement wrapping one
       let left: t.Node | null = null;
       let right: t.Node | null = null;
-
       if (t.isAssignmentExpression(node)) {
         left = node.left;
         right = node.right;
@@ -190,24 +173,147 @@ export default {
       } else {
         return false;
       }
-
       if (!left || !isPrototypeLeft(left)) return false;
       if (!right) return false;
       if (!(t.isFunctionExpression(right) || t.isArrowFunctionExpression(right))) return false;
-
       const body = (right as t.FunctionExpression | t.ArrowFunctionExpression).body;
       const searchBody = t.isBlockStatement(body) ? body : t.blockStatement([t.returnStatement(body as any)]);
-
       const innerId = findThisInnerIdentifier(searchBody);
       const hasCall = hasThisTrueCall(searchBody);
-
       if (innerId && hasCall) {
-        // set the capture explicitly so modulesId.current will be available
         modulesId.match(t.identifier(innerId) as any);
         logger('debug', { note: 'matched _modules', assignedProp: (left as t.MemberExpression).property && (left as t.MemberExpression).property.type === 'Identifier' ? ((left as t.MemberExpression).property as t.Identifier).name : null, captured: innerId });
         return true;
       }
+      return false;
+    });
 
+    const dataId = m.capture<t.Identifier>(m.identifier());
+
+    function findThisAlias(body: t.Node): string | null {
+      let alias: string | null = null;
+      walk(body, (n) => {
+        if (alias) return;
+        if (!t.isVariableDeclarator(n)) return;
+        if (!t.isIdentifier(n.id)) return;
+        const idName = n.id.name;
+        const init = n.init;
+        if (init && t.isThisExpression(init)) {
+          alias = idName;
+        }
+      });
+      return alias;
+    }
+
+    function findAliasVmStateAssignment(body: t.Node, aliasName: string, paramName: string): string | null {
+      let found: string | null = null;
+      walk(body, (n) => {
+        if (found) return;
+        if (!t.isAssignmentExpression(n)) return;
+        const left = n.left;
+        if (!t.isMemberExpression(left)) return;
+        if (left.computed) return;
+        if (!t.isIdentifier(left.property) || left.property.name !== '$$state') return;
+        const inner = left.object;
+        if (!t.isMemberExpression(inner)) return;
+        if (inner.computed) return;
+        if (!t.isIdentifier(inner.property)) return;
+        const dataName = inner.property.name;
+        const vmObj = inner.object;
+        if (!t.isMemberExpression(vmObj)) return;
+        if (vmObj.computed) return;
+        if (!t.isIdentifier(vmObj.property) || vmObj.property.name !== '_vm') return;
+        if (!t.isIdentifier(vmObj.object) || vmObj.object.name !== aliasName) return;
+        const right = n.right;
+        if (!t.isIdentifier(right)) return;
+        if (right.name !== paramName) return;
+        found = dataName;
+      });
+      return found;
+    }
+
+    addPattern('_data', dataId, (node: t.Node) => {
+      let left: t.Node | null = null;
+      let right: t.Node | null = null;
+      if (t.isAssignmentExpression(node)) {
+        left = node.left;
+        right = node.right;
+      } else if (t.isExpressionStatement(node) && t.isAssignmentExpression(node.expression)) {
+        left = node.expression.left;
+        right = node.expression.right;
+      } else {
+        return false;
+      }
+      if (!left || !isPrototypeLeft(left)) return false;
+      if (!right) return false;
+      if (!(t.isFunctionExpression(right) || t.isArrowFunctionExpression(right))) return false;
+      const outerParams = (right as t.FunctionExpression | t.ArrowFunctionExpression).params;
+      if (!outerParams || outerParams.length === 0) return false;
+      const firstParam = outerParams[0];
+      if (!t.isIdentifier(firstParam)) return false;
+      const paramName = firstParam.name;
+      const body = (right as t.FunctionExpression | t.ArrowFunctionExpression).body;
+      const searchBody = t.isBlockStatement(body) ? body : t.blockStatement([t.returnStatement(body as any)]);
+      const alias = findThisAlias(searchBody);
+      if (!alias) return false;
+      let matchedDataName: string | null = null;
+      walk(searchBody, (n) => {
+        if (matchedDataName) return;
+        if (!t.isCallExpression(n)) return;
+        const callee = n.callee;
+        if (!t.isMemberExpression(callee)) return;
+        if (!t.isThisExpression(callee.object)) return;
+        if (callee.computed || !t.isIdentifier(callee.property)) return;
+        if (!n.arguments || n.arguments.length === 0) return;
+        const firstArg = n.arguments[0];
+        if (!(t.isFunctionExpression(firstArg) || t.isArrowFunctionExpression(firstArg))) return;
+        const cbBody = (firstArg as t.FunctionExpression | t.ArrowFunctionExpression).body;
+        const cbSearchBody = t.isBlockStatement(cbBody) ? cbBody : t.blockStatement([t.returnStatement(cbBody as any)]);
+        const dataName = findAliasVmStateAssignment(cbSearchBody, alias, paramName);
+        if (dataName) matchedDataName = dataName;
+      });
+      if (matchedDataName) {
+        dataId.match(t.identifier(matchedDataName) as any);
+        logger('debug', { note: 'matched _data', assignedProp: (left as t.MemberExpression).property && (left as t.MemberExpression).property.type === 'Identifier' ? ((left as t.MemberExpression).property as t.Identifier).name : null, captured: matchedDataName });
+        return true;
+      }
+      return false;
+    });
+
+    const appearanceId = m.capture<t.Identifier>(m.identifier());
+
+    function collectAppearanceSequence(root: t.Node): string[] {
+      const seq: string[] = [];
+      walk(root, (n) => {
+        if (!t.isCallExpression(n)) return;
+        const outer = n;
+        if (!outer.arguments || outer.arguments.length < 2) return;
+        const firstArg = outer.arguments[0];
+        const secondArg = outer.arguments[1];
+        if (!t.isThisExpression(firstArg)) return;
+        if (!t.isStringLiteral(secondArg)) return;
+        const callee = outer.callee;
+        if (!t.isCallExpression(callee)) return;
+        const innerCallee = callee.callee;
+        if (!(t.isIdentifier(innerCallee) || t.isMemberExpression(innerCallee))) return;
+        seq.push(secondArg.value);
+      });
+      return seq;
+    }
+
+    addPattern('appearance_obf', appearanceId, (node: t.Node) => {
+      const seq = collectAppearanceSequence(node);
+      if (seq.length === 0) return false;
+      for (let i = 1; i < seq.length; i++) {
+        if (seq[i] === 'sun') {
+          const prev = seq[i - 1];
+          if (prev && prev !== 'sun') {
+            appearanceId.match(t.identifier(prev) as any);
+            logger('debug', { note: 'matched appearance_obf', captured: prev });
+            return true;
+          }
+        }
+      }
       return false;
     });
 
@@ -263,16 +369,13 @@ export default {
             for (const p of patterns) {
               if (!discovered.has(p.name)) missing.push(p.name);
             }
-
             if (missing.length > 0) {
               logger('error', { message: 'missing patterns', missing });
             }
-
             if (discovered.size === 0) {
               logger('result', { discovered: {} });
               return;
             }
-
             const props: t.ObjectProperty[] = [];
             const resultObj: Record<string, string> = {};
             for (const [readable, obf] of discovered) {
