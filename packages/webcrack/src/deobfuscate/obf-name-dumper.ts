@@ -30,35 +30,11 @@ export default {
   visitor() {
     const patterns: Pattern[] = [];
 
-    function addPattern(name: string, captureId: m.CapturedMatcher<t.Identifier>, predicate: (node: t.Node) => boolean) {
-      patterns.push({ name, captureId, predicate });
+    function register(name: string, predicate: (node: t.Node) => boolean) {
+      const capture = m.capture<t.Identifier>(m.identifier());
+      patterns.push({ name, captureId: capture, predicate });
+      return capture;
     }
-
-    const vueId = m.capture<t.Identifier>(m.identifier());
-    const vueMemberMatcher = m.matcher<t.MemberExpression>((node) => {
-      if (!t.isMemberExpression(node)) return false;
-      const obj = node.object;
-      if (!t.isMemberExpression(obj)) return false;
-      if (obj.computed || !t.isIdentifier(obj.property)) return false;
-      const intermediate = obj.property.name;
-      if (intermediate !== '$el' && intermediate !== '$vnode') return false;
-      if (!node.computed && t.isIdentifier(node.property)) {
-        return vueId.match(node.property as any);
-      }
-      return false;
-    }) as any;
-
-    addPattern('__vue__', vueId, (node: t.Node) => {
-      if (t.isAssignmentExpression(node)) {
-        return vueMemberMatcher.match(node.left as any);
-      }
-      if (t.isExpressionStatement(node) && t.isAssignmentExpression(node.expression)) {
-        return vueMemberMatcher.match((node.expression as t.AssignmentExpression).left as any);
-      }
-      return contains(node, vueMemberMatcher);
-    });
-
-    const modulesId = m.capture<t.Identifier>(m.identifier());
 
     function walk(node: t.Node | null | undefined, cb: (n: t.Node) => void) {
       if (!node) return;
@@ -127,41 +103,61 @@ export default {
       return true;
     }
 
-    function findThisInnerIdentifier(body: t.Node): string | null {
-      let found: string | null = null;
-      walk(body, (n) => {
-        if (found) return;
-        if (!t.isMemberExpression(n)) return;
+    const vueId = register('__vue__', (node: t.Node) => {
+      const vueMemberMatcher = m.matcher<t.MemberExpression>((n) => {
+        if (!t.isMemberExpression(n)) return false;
         const obj = n.object;
-        if (t.isMemberExpression(obj) && t.isThisExpression(obj.object) && !obj.computed && t.isIdentifier(obj.property)) {
-          found = obj.property.name;
-          return;
+        if (!t.isMemberExpression(obj)) return false;
+        if (obj.computed || !t.isIdentifier(obj.property)) return false;
+        const intermediate = obj.property.name;
+        if (intermediate !== '$el' && intermediate !== '$vnode') return false;
+        if (!n.computed && t.isIdentifier(n.property)) {
+          return vueId.match(n.property as any);
         }
-        if (t.isThisExpression(n.object) && !n.computed && t.isIdentifier(n.property)) {
-          found = n.property.name;
-          return;
-        }
-      });
-      return found;
-    }
+        return false;
+      }) as any;
+      if (t.isAssignmentExpression(node)) {
+        return vueMemberMatcher.match(node.left as any);
+      }
+      if (t.isExpressionStatement(node) && t.isAssignmentExpression(node.expression)) {
+        return vueMemberMatcher.match((node.expression as t.AssignmentExpression).left as any);
+      }
+      return contains(node, vueMemberMatcher);
+    });
 
-    function hasThisTrueCall(body: t.Node): boolean {
-      let ok = false;
-      walk(body, (n) => {
-        if (ok) return;
-        if (!t.isCallExpression(n)) return;
-        const callee = n.callee;
-        if (!t.isIdentifier(callee)) return;
-        const args = n.arguments;
-        if (args.length < 2) return;
-        if (!t.isThisExpression(args[0])) return;
-        if (!t.isBooleanLiteral(args[1])) return;
-        if (args[1].value === true) ok = true;
-      });
-      return ok;
-    }
-
-    addPattern('_modules', modulesId, (node: t.Node) => {
+    const modulesId = register('_modules', (node: t.Node) => {
+      function findThisInnerIdentifier(body: t.Node): string | null {
+        let found: string | null = null;
+        walk(body, (n) => {
+          if (found) return;
+          if (!t.isMemberExpression(n)) return;
+          const obj = n.object;
+          if (t.isMemberExpression(obj) && t.isThisExpression(obj.object) && !obj.computed && t.isIdentifier(obj.property)) {
+            found = obj.property.name;
+            return;
+          }
+          if (t.isThisExpression(n.object) && !n.computed && t.isIdentifier(n.property)) {
+            found = n.property.name;
+            return;
+          }
+        });
+        return found;
+      }
+      function hasThisTrueCall(body: t.Node): boolean {
+        let ok = false;
+        walk(body, (n) => {
+          if (ok) return;
+          if (!t.isCallExpression(n)) return;
+          const callee = n.callee;
+          if (!t.isIdentifier(callee)) return;
+          const args = n.arguments;
+          if (args.length < 2) return;
+          if (!t.isThisExpression(args[0])) return;
+          if (!t.isBooleanLiteral(args[1])) return;
+          if (args[1].value === true) ok = true;
+        });
+        return ok;
+      }
       let left: t.Node | null = null;
       let right: t.Node | null = null;
       if (t.isAssignmentExpression(node)) {
@@ -182,57 +178,52 @@ export default {
       const hasCall = hasThisTrueCall(searchBody);
       if (innerId && hasCall) {
         modulesId.match(t.identifier(innerId) as any);
-        logger('debug', { note: 'matched _modules', assignedProp: (left as t.MemberExpression).property && (left as t.MemberExpression).property.type === 'Identifier' ? ((left as t.MemberExpression).property as t.Identifier).name : null, captured: innerId });
         return true;
       }
       return false;
     });
 
-    const dataId = m.capture<t.Identifier>(m.identifier());
-
-    function findThisAlias(body: t.Node): string | null {
-      let alias: string | null = null;
-      walk(body, (n) => {
-        if (alias) return;
-        if (!t.isVariableDeclarator(n)) return;
-        if (!t.isIdentifier(n.id)) return;
-        const idName = n.id.name;
-        const init = n.init;
-        if (init && t.isThisExpression(init)) {
-          alias = idName;
-        }
-      });
-      return alias;
-    }
-
-    function findAliasVmStateAssignment(body: t.Node, aliasName: string, paramName: string): string | null {
-      let found: string | null = null;
-      walk(body, (n) => {
-        if (found) return;
-        if (!t.isAssignmentExpression(n)) return;
-        const left = n.left;
-        if (!t.isMemberExpression(left)) return;
-        if (left.computed) return;
-        if (!t.isIdentifier(left.property) || left.property.name !== '$$state') return;
-        const inner = left.object;
-        if (!t.isMemberExpression(inner)) return;
-        if (inner.computed) return;
-        if (!t.isIdentifier(inner.property)) return;
-        const dataName = inner.property.name;
-        const vmObj = inner.object;
-        if (!t.isMemberExpression(vmObj)) return;
-        if (vmObj.computed) return;
-        if (!t.isIdentifier(vmObj.property) || vmObj.property.name !== '_vm') return;
-        if (!t.isIdentifier(vmObj.object) || vmObj.object.name !== aliasName) return;
-        const right = n.right;
-        if (!t.isIdentifier(right)) return;
-        if (right.name !== paramName) return;
-        found = dataName;
-      });
-      return found;
-    }
-
-    addPattern('_data', dataId, (node: t.Node) => {
+    const dataId = register('_data', (node: t.Node) => {
+      function findThisAlias(body: t.Node): string | null {
+        let alias: string | null = null;
+        walk(body, (n) => {
+          if (alias) return;
+          if (!t.isVariableDeclarator(n)) return;
+          if (!t.isIdentifier(n.id)) return;
+          const idName = n.id.name;
+          const init = n.init;
+          if (init && t.isThisExpression(init)) {
+            alias = idName;
+          }
+        });
+        return alias;
+      }
+      function findAliasVmStateAssignment(body: t.Node, aliasName: string, paramName: string): string | null {
+        let found: string | null = null;
+        walk(body, (n) => {
+          if (found) return;
+          if (!t.isAssignmentExpression(n)) return;
+          const left = n.left;
+          if (!t.isMemberExpression(left)) return;
+          if (left.computed) return;
+          if (!t.isIdentifier(left.property) || left.property.name !== '$$state') return;
+          const inner = left.object;
+          if (!t.isMemberExpression(inner)) return;
+          if (inner.computed) return;
+          if (!t.isIdentifier(inner.property)) return;
+          const dataName = inner.property.name;
+          const vmObj = inner.object;
+          if (!t.isMemberExpression(vmObj)) return;
+          if (vmObj.computed) return;
+          if (!t.isIdentifier(vmObj.property) || vmObj.property.name !== '_vm') return;
+          if (!t.isIdentifier(vmObj.object) || vmObj.object.name !== aliasName) return;
+          const right = n.right;
+          if (!t.isIdentifier(right)) return;
+          if (right.name !== paramName) return;
+          found = dataName;
+        });
+        return found;
+      }
       let left: t.Node | null = null;
       let right: t.Node | null = null;
       if (t.isAssignmentExpression(node)) {
@@ -274,42 +265,37 @@ export default {
       });
       if (matchedDataName) {
         dataId.match(t.identifier(matchedDataName) as any);
-        logger('debug', { note: 'matched _data', assignedProp: (left as t.MemberExpression).property && (left as t.MemberExpression).property.type === 'Identifier' ? ((left as t.MemberExpression).property as t.Identifier).name : null, captured: matchedDataName });
         return true;
       }
       return false;
     });
 
-    const appearanceId = m.capture<t.Identifier>(m.identifier());
-
-    function collectAppearanceSequence(root: t.Node): string[] {
-      const seq: string[] = [];
-      walk(root, (n) => {
-        if (!t.isCallExpression(n)) return;
-        const outer = n;
-        if (!outer.arguments || outer.arguments.length < 2) return;
-        const firstArg = outer.arguments[0];
-        const secondArg = outer.arguments[1];
-        if (!t.isThisExpression(firstArg)) return;
-        if (!t.isStringLiteral(secondArg)) return;
-        const callee = outer.callee;
-        if (!t.isCallExpression(callee)) return;
-        const innerCallee = callee.callee;
-        if (!(t.isIdentifier(innerCallee) || t.isMemberExpression(innerCallee))) return;
-        seq.push(secondArg.value);
-      });
-      return seq;
-    }
-
-    addPattern('appearance_obf', appearanceId, (node: t.Node) => {
-      const seq = collectAppearanceSequence(node);
+    const appearanceId = register('appearance_obf', (node: t.Node) => {
+      function collectSequence(root: t.Node): string[] {
+        const seq: string[] = [];
+        walk(root, (n) => {
+          if (!t.isCallExpression(n)) return;
+          const outer = n;
+          if (!outer.arguments || outer.arguments.length < 2) return;
+          const firstArg = outer.arguments[0];
+          const secondArg = outer.arguments[1];
+          if (!t.isThisExpression(firstArg)) return;
+          if (!t.isStringLiteral(secondArg)) return;
+          const callee = outer.callee;
+          if (!t.isCallExpression(callee)) return;
+          const innerCallee = callee.callee;
+          if (!(t.isIdentifier(innerCallee) || t.isMemberExpression(innerCallee))) return;
+          seq.push(secondArg.value);
+        });
+        return seq;
+      }
+      const seq = collectSequence(node);
       if (seq.length === 0) return false;
       for (let i = 1; i < seq.length; i++) {
         if (seq[i] === 'sun') {
           const prev = seq[i - 1];
           if (prev && prev !== 'sun') {
             appearanceId.match(t.identifier(prev) as any);
-            logger('debug', { note: 'matched appearance_obf', captured: prev });
             return true;
           }
         }
@@ -319,79 +305,57 @@ export default {
 
     const discovered = new Map<string, string>();
 
+    function tryCapture(node: t.Node) {
+      for (const p of patterns) {
+        try {
+          if (p.predicate(node)) {
+            const idCap = p.captureId;
+            if (idCap && idCap.current) {
+              const name = idCap.current.name;
+              if (!discovered.has(p.name)) discovered.set(p.name, name);
+            } else {
+              logger('error', { message: 'pattern matched but capture empty', pattern: p.name });
+            }
+          }
+        } catch (err) {
+          logger('error', { message: 'error while processing node', error: err });
+        }
+      }
+    }
+
     return {
       AssignmentExpression(path) {
-        try {
-          for (const p of patterns) {
-            if (p.predicate(path.node)) {
-              const idCap = p.captureId;
-              if (idCap && idCap.current) {
-                const name = idCap.current.name;
-                if (!discovered.has(p.name)) {
-                  discovered.set(p.name, name);
-                  logger('debug', { note: 'captured', pattern: p.name, capture: name });
-                }
-              } else {
-                logger('error', { message: 'pattern matched but capture empty', pattern: p.name });
-              }
-            }
-          }
-        } catch (err) {
-          logger('error', { message: 'error while processing AssignmentExpression', error: err });
-        }
+        tryCapture(path.node);
       },
-
       ExpressionStatement(path) {
-        try {
-          for (const p of patterns) {
-            if (p.predicate(path.node)) {
-              const idCap = p.captureId;
-              if (idCap && idCap.current) {
-                const name = idCap.current.name;
-                if (!discovered.has(p.name)) {
-                  discovered.set(p.name, name);
-                  logger('debug', { note: 'captured', pattern: p.name, capture: name });
-                }
-              } else {
-                logger('error', { message: 'pattern matched but capture empty', pattern: p.name });
-              }
-            }
-          }
-        } catch (err) {
-          logger('error', { message: 'error while processing ExpressionStatement', error: err });
-        }
+        tryCapture(path.node);
       },
-
       Program: {
         exit(path) {
-          try {
-            const missing: string[] = [];
-            for (const p of patterns) {
-              if (!discovered.has(p.name)) missing.push(p.name);
-            }
-            if (missing.length > 0) {
-              logger('error', { message: 'missing patterns', missing });
-            }
-            if (discovered.size === 0) {
-              logger('result', { discovered: {} });
-              return;
-            }
-            const props: t.ObjectProperty[] = [];
-            const resultObj: Record<string, string> = {};
-            for (const [readable, obf] of discovered) {
-              props.push(t.objectProperty(t.identifier(readable), t.stringLiteral(obf)));
-              resultObj[readable] = obf;
-            }
-            const decl = t.variableDeclaration('const', [
-              t.variableDeclarator(t.identifier('__obf_names'), t.objectExpression(props)),
-            ]);
-            path.node.body.push(decl);
-            logger('result', { discovered: resultObj });
-            // @ts-ignore
-            if (typeof this.changes === 'number') this.changes += 1;
-          } catch (err) {
-            logger('error', { message: 'error in Program.exit', error: err });
+          const missing: string[] = [];
+          for (const p of patterns) {
+            if (!discovered.has(p.name)) missing.push(p.name);
           }
+          if (missing.length > 0) {
+            logger('error', { message: 'missing patterns', missing });
+          }
+          if (discovered.size === 0) {
+            logger('result', { discovered: {} });
+            return;
+          }
+          const props: t.ObjectProperty[] = [];
+          const resultObj: Record<string, string> = {};
+          for (const [readable, obf] of discovered) {
+            props.push(t.objectProperty(t.identifier(readable), t.stringLiteral(obf)));
+            resultObj[readable] = obf;
+          }
+          const decl = t.variableDeclaration('const', [
+            t.variableDeclarator(t.identifier('__obf_names'), t.objectExpression(props)),
+          ]);
+          path.node.body.push(decl);
+          logger('result', { discovered: resultObj });
+          // @ts-ignore
+          if (typeof this.changes === 'number') this.changes += 1;
         },
       },
     };
