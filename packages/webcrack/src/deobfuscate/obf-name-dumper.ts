@@ -429,6 +429,116 @@ export default {
       return matched;
     });
 
+    const playerStateId = register('playerState', (node: t.Node) => {
+      const DIVISOR = 0.016666666666666666;
+
+      // helpers to safely read start/end from nodes (typed as optional numbers)
+      function getStart(n: t.Node | null | undefined): number | undefined {
+        return (n as unknown as { start?: number })?.start;
+      }
+      function getEnd(n: t.Node | null | undefined): number | undefined {
+        return (n as unknown as { end?: number })?.end;
+      }
+
+      // 1) find a declarator: var <local> = this.<prop>;
+      let candidateProp: t.Identifier | null = null;
+      let declaratorNode: t.Node | null = null;
+      walk(node, (n) => {
+        if (candidateProp) return;
+        if (!t.isVariableDeclarator(n)) return;
+        if (!t.isIdentifier(n.id)) return;
+        const init = n.init;
+        if (!init || !t.isMemberExpression(init)) return;
+        if (init.computed) return;
+        if (!t.isThisExpression(init.object)) return;
+        if (!t.isIdentifier(init.property)) return;
+        candidateProp = init.property;
+        declaratorNode = n;
+      });
+
+      if (!candidateProp || !declaratorNode) return false;
+      const declStart = getStart(declaratorNode);
+      const declEnd = getEnd(declaratorNode);
+      if (typeof declStart !== 'number' || typeof declEnd !== 'number') return false;
+
+      // 2) find smallest enclosing container (Program / Block / Function) that contains the declarator
+      let container: t.Node | null = null;
+      let bestSize = Infinity;
+      walk(node, (n) => {
+        if (!(t.isProgram(n) || t.isBlockStatement(n) || t.isFunctionExpression(n) || t.isArrowFunctionExpression(n) || t.isFunctionDeclaration(n))) return;
+        const nStart = getStart(n);
+        const nEnd = getEnd(n);
+        if (typeof nStart !== 'number' || typeof nEnd !== 'number') return;
+        if (nStart <= declStart && nEnd >= declEnd) {
+          const size = nEnd - nStart;
+          if (size < bestSize) {
+            bestSize = size;
+            container = n;
+          }
+        }
+      });
+      const searchRoot = container || node;
+
+      // 3) helper: is binary division by the exact constant
+      function isDivByConstant(n: t.Node): n is t.BinaryExpression {
+        if (!t.isBinaryExpression(n)) return false;
+        if (n.operator !== '/') return false;
+        const right = n.right;
+        if (!t.isNumericLiteral(right)) return false;
+        return right.value === DIVISOR || String(right.value) === '0.016666666666666666';
+      }
+
+      // 4) search inside the container for a tf update that occurs after the declarator
+      let matched = false;
+      walk(searchRoot, (n) => {
+        if (matched) return;
+
+        // consider ExpressionStatement with assignment: this.tf += ...
+        if (t.isExpressionStatement(n) && t.isAssignmentExpression(n.expression)) {
+          const a = n.expression;
+          if (a.operator === '+=') {
+            const left = a.left;
+            if (t.isMemberExpression(left) && !left.computed && t.isThisExpression(left.object) && t.isIdentifier(left.property) && left.property.name === 'tf') {
+              const right = a.right;
+              if (isDivByConstant(right)) {
+                const nStart = getStart(n);
+                if (typeof nStart === 'number' && nStart > declEnd) {
+                  matched = true;
+                  return;
+                }
+              }
+            }
+          }
+        }
+
+        // also handle raw AssignmentExpression nodes (not wrapped)
+        if (t.isAssignmentExpression(n)) {
+          const a = n;
+          if (a.operator === '+=') {
+            const left = a.left;
+            if (t.isMemberExpression(left) && !left.computed && t.isThisExpression(left.object) && t.isIdentifier(left.property) && left.property.name === 'tf') {
+              const right = a.right;
+              if (isDivByConstant(right)) {
+                const nStart = getStart(n);
+                if (typeof nStart === 'number' && nStart > declEnd) {
+                  matched = true;
+                  return;
+                }
+              }
+            }
+          }
+        }
+      });
+
+      if (matched) {
+        playerStateId.match(candidateProp as any);
+        return true;
+      }
+
+      return false;
+    });
+
+
     const discovered = new Map<string, string>();
 
     function tryCapture(node: t.Node) {
