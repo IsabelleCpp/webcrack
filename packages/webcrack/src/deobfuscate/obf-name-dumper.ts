@@ -341,6 +341,93 @@ export default {
       return true;
     });
 
+    const blockConfigId = register('blockConfig', (node: t.Node) => {
+      // helper that checks a MemberExpression of the form X.Y.Z.SKYBOX___SETTING
+      function matchMemberChain(expr: t.Node): boolean {
+        if (!t.isMemberExpression(expr)) return false;
+        const outer = expr as t.MemberExpression; // ... . SKYBOX___SETTING
+        if (outer.computed) return false;
+        if (!t.isIdentifier(outer.property) || outer.property.name !== 'SKYBOX___SETTING') return false;
+
+        const mid = outer.object;
+        if (!t.isMemberExpression(mid) || mid.computed) return false;
+
+        const inner = (mid as t.MemberExpression).object;
+        if (!t.isMemberExpression(inner) || inner.computed) return false;
+        const innerProp = (inner as t.MemberExpression).property;
+        if (!t.isIdentifier(innerProp)) return false;
+
+        // register the obfuscated inner property (e.g., "WmwwMNW")
+        blockConfigId.match(innerProp as any);
+        return true;
+      }
+
+      // 1) If the node itself is a MemberExpression (rare for return form, but keep for completeness)
+      if (t.isMemberExpression(node)) {
+        return matchMemberChain(node);
+      }
+
+      // 2) If the node is a ReturnStatement returning the member chain
+      if (t.isReturnStatement(node) && node.argument) {
+        if (matchMemberChain(node.argument)) return true;
+      }
+
+      // 3) Walk the subtree and look for ReturnStatement nodes (covers functions / blocks)
+      let matched = false;
+      walk(node, (n) => {
+        if (matched) return;
+        if (!t.isReturnStatement(n)) return;
+        const arg = n.argument;
+        if (!arg) return;
+        if (matchMemberChain(arg)) matched = true;
+      });
+
+      return matched;
+    });
+
+    const settingsId = register('settings', (node: t.Node) => {
+      function matchMemberChain(expr: t.Node): boolean {
+        if (!t.isMemberExpression(expr)) return false;
+        const outer = expr as t.MemberExpression; // ... . SKYBOX___SETTING
+        if (outer.computed) return false;
+        if (!t.isIdentifier(outer.property) || outer.property.name !== 'SKYBOX___SETTING') return false;
+
+        const mid = outer.object;
+        if (!t.isMemberExpression(mid) || mid.computed) return false;
+
+        const inner = (mid as t.MemberExpression).object;
+        if (!t.isMemberExpression(inner) || inner.computed) return false;
+
+        const midProp = (mid as t.MemberExpression).property;
+        if (!t.isIdentifier(midProp)) return false;
+
+        // register the obfuscated middle property (e.g., "wwNmMWn")
+        settingsId.match(midProp as any);
+        return true;
+      }
+
+      // 1) If the node itself is a MemberExpression
+      if (t.isMemberExpression(node)) {
+        return matchMemberChain(node);
+      }
+
+      // 2) If the node is a ReturnStatement returning the member chain
+      if (t.isReturnStatement(node) && node.argument) {
+        if (matchMemberChain(node.argument)) return true;
+      }
+
+      // 3) Walk the subtree and look for ReturnStatement nodes (covers functions / blocks)
+      let matched = false;
+      walk(node, (n) => {
+        if (matched) return;
+        if (!t.isReturnStatement(n)) return;
+        const arg = n.argument;
+        if (!arg) return;
+        if (matchMemberChain(arg)) matched = true;
+      });
+
+      return matched;
+    });
 
     const discovered = new Map<string, string>();
 
