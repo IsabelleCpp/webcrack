@@ -11,6 +11,7 @@ type Pattern = {
   predicate: (node: t.Node) => boolean;
 };
 
+/* Lightweight contains wrapper used by many predicates */
 function contains(node: t.Node, matcher: m.Matcher<any>) {
   let found = false;
   m.matcher<t.Node>((n) => {
@@ -24,6 +25,220 @@ function contains(node: t.Node, matcher: m.Matcher<any>) {
   return found;
 }
 
+/* Generic AST walker that visits children in a predictable way.
+   Keeps the original behavior but is easier to read and extend. */
+function walk(node: t.Node | null | undefined, cb: (n: t.Node) => void) {
+  if (!node) return;
+  cb(node);
+
+  // Common node families handled explicitly for clarity and speed
+  if (t.isProgram(node) || t.isBlockStatement(node)) {
+    for (const s of node.body) walk(s, cb);
+    return;
+  }
+
+  if (t.isExpressionStatement(node)) {
+    walk(node.expression, cb);
+    return;
+  }
+
+  if (t.isAssignmentExpression(node)) {
+    walk(node.left, cb);
+    walk(node.right, cb);
+    return;
+  }
+
+  if (t.isCallExpression(node)) {
+    walk(node.callee as any, cb);
+    for (const a of node.arguments) walk(a as any, cb);
+    return;
+  }
+
+  if (t.isMemberExpression(node)) {
+    walk(node.object as any, cb);
+    walk(node.property as any, cb);
+    return;
+  }
+
+  if (t.isFunctionExpression(node) || t.isArrowFunctionExpression(node)) {
+    walk(node.body as any, cb);
+    for (const p of node.params) walk(p as any, cb);
+    return;
+  }
+
+  if (t.isReturnStatement(node)) {
+    walk(node.argument as any, cb);
+    return;
+  }
+
+  if (t.isVariableDeclaration(node)) {
+    for (const d of node.declarations) walk(d as any, cb);
+    return;
+  }
+
+  if (t.isVariableDeclarator(node)) {
+    walk(node.id as any, cb);
+    walk(node.init as any, cb);
+    return;
+  }
+
+  if (t.isIfStatement(node)) {
+    walk(node.test as any, cb);
+    walk(node.consequent as any, cb);
+    walk(node.alternate as any, cb);
+    return;
+  }
+
+  if (t.isUnaryExpression(node) || t.isBinaryExpression(node) || t.isLogicalExpression(node)) {
+    // binary: left/right, unary: argument
+    // use safe access to support mixed shapes
+    // @ts-ignore
+    walk((node as any).left ?? (node as any).argument, cb);
+    // @ts-ignore
+    walk((node as any).right ?? null, cb);
+    return;
+  }
+
+  if (t.isObjectExpression(node)) {
+    for (const p of node.properties) {
+      // @ts-ignore
+      walk((p as any).value, cb);
+    }
+    return;
+  }
+
+  if (t.isArrayExpression(node)) {
+    for (const e of node.elements) walk(e as any, cb);
+    return;
+  }
+
+  // Fallback: iterate object keys and walk any child nodes
+  for (const key of Object.keys(node as any)) {
+    const val = (node as any)[key];
+    if (Array.isArray(val)) {
+      for (const el of val) if (el && typeof el.type === 'string') walk(el, cb);
+    } else if (val && typeof val.type === 'string') {
+      walk(val, cb);
+    }
+  }
+}
+
+/* Helpers used by multiple patterns */
+
+// Checks for MemberExpression of the form X.prototype.Y (non-computed)
+function isPrototypeLeft(node: t.Node): node is t.MemberExpression {
+  if (!t.isMemberExpression(node)) return false;
+  const obj = node.object;
+  if (!t.isMemberExpression(obj)) return false;
+  if (obj.computed) return false;
+  if (!t.isIdentifier(obj.property) || obj.property.name !== 'prototype') return false;
+  if (node.computed) return false;
+  if (!t.isIdentifier(node.property)) return false;
+  return true;
+}
+
+function getStart(n: t.Node | null | undefined): number | undefined {
+  return (n as unknown as { start?: number })?.start;
+}
+function getEnd(n: t.Node | null | undefined): number | undefined {
+  return (n as unknown as { end?: number })?.end;
+}
+
+/* Find the smallest enclosing Program/Block/Function that contains a given range */
+function findSmallestContainer(root: t.Node, start: number, end: number): t.Node | null {
+  let container: t.Node | null = null;
+  let bestSize = Infinity;
+  walk(root, (n) => {
+    if (!(t.isProgram(n) || t.isBlockStatement(n) || t.isFunctionExpression(n) || t.isArrowFunctionExpression(n) || t.isFunctionDeclaration(n))) return;
+    const nStart = getStart(n);
+    const nEnd = getEnd(n);
+    if (typeof nStart !== 'number' || typeof nEnd !== 'number') return;
+    if (nStart <= start && nEnd >= end) {
+      const size = nEnd - nStart;
+      if (size < bestSize) {
+        bestSize = size;
+        container = n;
+      }
+    }
+  });
+  return container;
+}
+
+/* Generic helper to find a declarator of the form var <id> = this.<...>.<prop> */
+function findDeclaratorChain(root: t.Node) {
+  let innerProp: t.Identifier | null = null;
+  let outerProp: t.Identifier | null = null;
+  let declaratorNode: t.Node | null = null;
+
+  walk(root, (n) => {
+    if (innerProp && outerProp) return;
+    if (!t.isVariableDeclarator(n)) return;
+    if (!t.isIdentifier(n.id)) return;
+    const init = n.init;
+    if (!init || !t.isMemberExpression(init)) return;
+    if (init.computed) return;
+
+    const outerME = init;
+    const outer = outerME.property;
+    const innerME = outerME.object;
+    if (!t.isMemberExpression(innerME)) return;
+    if (innerME.computed) return;
+    const innerObj = innerME.object;
+    const inner = innerME.property;
+
+    if (!t.isThisExpression(innerObj)) return;
+    if (!t.isIdentifier(inner) || !t.isIdentifier(outer)) return;
+
+    innerProp = inner;
+    outerProp = outer;
+    declaratorNode = n;
+  });
+
+  return { innerProp, outerProp, declaratorNode };
+}
+
+/* Check for division by a specific numeric constant */
+function isDivByConstant(n: t.Node, value: number) {
+  if (!t.isBinaryExpression(n)) return false;
+  if (n.operator !== '/') return false;
+  const right = n.right;
+  if (!t.isNumericLiteral(right)) return false;
+  return right.value === value || String(right.value) === String(value);
+}
+
+/* Search for a this.tf += <expr> / DIVISOR update that occurs after a given position */
+function findTfUpdateAfter(root: t.Node, afterPos: number, divisor: number) {
+  let found = false;
+  walk(root, (n) => {
+    if (found) return;
+    // ExpressionStatement wrapper
+    if (t.isExpressionStatement(n) && t.isAssignmentExpression(n.expression)) {
+      const a = n.expression;
+      if (a.operator === '+=') {
+        const left = a.left;
+        if (t.isMemberExpression(left) && !left.computed && t.isThisExpression(left.object) && t.isIdentifier(left.property) && left.property.name === 'tf') {
+          if (isDivByConstant(a.right, divisor)) {
+            const nStart = getStart(n);
+            if (typeof nStart === 'number' && nStart > afterPos) found = true;
+          }
+        }
+      }
+    }
+    // raw assignment expression
+    if (t.isAssignmentExpression(n) && n.operator === '+=') {
+      const left = n.left;
+      if (t.isMemberExpression(left) && !left.computed && t.isThisExpression(left.object) && t.isIdentifier(left.property) && left.property.name === 'tf') {
+        if (isDivByConstant(n.right, divisor)) {
+          const nStart = getStart(n);
+          if (typeof nStart === 'number' && nStart > afterPos) found = true;
+        }
+      }
+    }
+  });
+  return found;
+}
+
+/* Pattern registration and definitions */
 export default {
   name: 'obf-name-dumper',
   tags: ['safe'],
@@ -36,73 +251,7 @@ export default {
       return capture;
     }
 
-    function walk(node: t.Node | null | undefined, cb: (n: t.Node) => void) {
-      if (!node) return;
-      cb(node);
-      if (t.isProgram(node)) {
-        for (const s of node.body) walk(s, cb);
-      } else if (t.isBlockStatement(node)) {
-        for (const s of node.body) walk(s, cb);
-      } else if (t.isExpressionStatement(node)) {
-        walk(node.expression, cb);
-      } else if (t.isAssignmentExpression(node)) {
-        walk(node.left, cb);
-        walk(node.right, cb);
-      } else if (t.isCallExpression(node)) {
-        walk(node.callee as any, cb);
-        for (const a of node.arguments) walk(a as any, cb);
-      } else if (t.isMemberExpression(node)) {
-        walk(node.object as any, cb);
-        walk(node.property as any, cb);
-      } else if (t.isFunctionExpression(node) || t.isArrowFunctionExpression(node)) {
-        walk(node.body as any, cb);
-        for (const p of node.params) walk(p as any, cb);
-      } else if (t.isReturnStatement(node)) {
-        walk(node.argument as any, cb);
-      } else if (t.isVariableDeclaration(node)) {
-        for (const d of node.declarations) walk(d as any, cb);
-      } else if (t.isVariableDeclarator(node)) {
-        walk(node.id as any, cb);
-        walk(node.init as any, cb);
-      } else if (t.isIfStatement(node)) {
-        walk(node.test as any, cb);
-        walk(node.consequent as any, cb);
-        walk(node.alternate as any, cb);
-      } else if (t.isUnaryExpression(node) || t.isBinaryExpression(node) || t.isLogicalExpression(node)) {
-        // @ts-ignore
-        walk((node as any).left ?? (node as any).argument, cb);
-        // @ts-ignore
-        walk((node as any).right ?? null, cb);
-      } else if (t.isObjectExpression(node)) {
-        for (const p of node.properties) {
-          // @ts-ignore
-          walk((p as any).value, cb);
-        }
-      } else if (t.isArrayExpression(node)) {
-        for (const e of node.elements) walk(e as any, cb);
-      } else {
-        for (const key of Object.keys(node as any)) {
-          const val = (node as any)[key];
-          if (Array.isArray(val)) {
-            for (const el of val) if (el && typeof el.type === 'string') walk(el, cb);
-          } else if (val && typeof val.type === 'string') {
-            walk(val, cb);
-          }
-        }
-      }
-    }
-
-    function isPrototypeLeft(node: t.Node): node is t.MemberExpression {
-      if (!t.isMemberExpression(node)) return false;
-      const obj = node.object;
-      if (!t.isMemberExpression(obj)) return false;
-      if (obj.computed) return false;
-      if (!t.isIdentifier(obj.property) || obj.property.name !== 'prototype') return false;
-      if (node.computed) return false;
-      if (!t.isIdentifier(node.property)) return false;
-      return true;
-    }
-
+    // Reusable pattern: __vue__
     const vueId = register('__vue__', (node: t.Node) => {
       const vueMemberMatcher = m.matcher<t.MemberExpression>((n) => {
         if (!t.isMemberExpression(n)) return false;
@@ -116,6 +265,7 @@ export default {
         }
         return false;
       }) as any;
+
       if (t.isAssignmentExpression(node)) {
         return vueMemberMatcher.match(node.left as any);
       }
@@ -125,6 +275,7 @@ export default {
       return contains(node, vueMemberMatcher);
     });
 
+    // _modules pattern (kept logic but clearer helpers)
     const modulesId = register('_modules', (node: t.Node) => {
       function findThisInnerIdentifier(body: t.Node): string | null {
         let found: string | null = null;
@@ -143,6 +294,7 @@ export default {
         });
         return found;
       }
+
       function hasThisTrueCall(body: t.Node): boolean {
         let ok = false;
         walk(body, (n) => {
@@ -158,6 +310,7 @@ export default {
         });
         return ok;
       }
+
       let left: t.Node | null = null;
       let right: t.Node | null = null;
       if (t.isAssignmentExpression(node)) {
@@ -169,9 +322,11 @@ export default {
       } else {
         return false;
       }
+
       if (!left || !isPrototypeLeft(left)) return false;
       if (!right) return false;
       if (!(t.isFunctionExpression(right) || t.isArrowFunctionExpression(right))) return false;
+
       const body = (right as t.FunctionExpression | t.ArrowFunctionExpression).body;
       const searchBody = t.isBlockStatement(body) ? body : t.blockStatement([t.returnStatement(body as any)]);
       const innerId = findThisInnerIdentifier(searchBody);
@@ -183,6 +338,7 @@ export default {
       return false;
     });
 
+    // _data pattern (kept logic but clearer helpers)
     const dataId = register('_data', (node: t.Node) => {
       function findThisAlias(body: t.Node): string | null {
         let alias: string | null = null;
@@ -198,6 +354,7 @@ export default {
         });
         return alias;
       }
+
       function findAliasVmStateAssignment(body: t.Node, aliasName: string, paramName: string): string | null {
         let found: string | null = null;
         walk(body, (n) => {
@@ -224,6 +381,7 @@ export default {
         });
         return found;
       }
+
       let left: t.Node | null = null;
       let right: t.Node | null = null;
       if (t.isAssignmentExpression(node)) {
@@ -235,9 +393,11 @@ export default {
       } else {
         return false;
       }
+
       if (!left || !isPrototypeLeft(left)) return false;
       if (!right) return false;
       if (!(t.isFunctionExpression(right) || t.isArrowFunctionExpression(right))) return false;
+
       const outerParams = (right as t.FunctionExpression | t.ArrowFunctionExpression).params;
       if (!outerParams || outerParams.length === 0) return false;
       const firstParam = outerParams[0];
@@ -247,6 +407,7 @@ export default {
       const searchBody = t.isBlockStatement(body) ? body : t.blockStatement([t.returnStatement(body as any)]);
       const alias = findThisAlias(searchBody);
       if (!alias) return false;
+
       let matchedDataName: string | null = null;
       walk(searchBody, (n) => {
         if (matchedDataName) return;
@@ -263,6 +424,7 @@ export default {
         const dataName = findAliasVmStateAssignment(cbSearchBody, alias, paramName);
         if (dataName) matchedDataName = dataName;
       });
+
       if (matchedDataName) {
         dataId.match(t.identifier(matchedDataName) as any);
         return true;
@@ -270,6 +432,7 @@ export default {
       return false;
     });
 
+    // appearance_obf pattern (unchanged logic but clearer)
     const appearanceId = register('appearance_obf', (node: t.Node) => {
       function collectSequence(root: t.Node): string[] {
         const seq: string[] = [];
@@ -303,6 +466,7 @@ export default {
       return false;
     });
 
+    // collisionAABB pattern (kept but simplified variable names)
     const collisionAABBId = register('collisionAABB', (node: t.Node) => {
       let left: t.Node | null = null;
       let right: t.Node | null = null;
@@ -325,7 +489,6 @@ export default {
       if (!right || !t.isMemberExpression(right)) return false;
       if (right.computed) return false;
 
-      const rightProp = right.property;
       const rightObj = right.object;
       if (!t.isMemberExpression(rightObj)) return false;
       if (rightObj.computed) return false;
@@ -341,442 +504,182 @@ export default {
       return true;
     });
 
-    const blockConfigId = register('blockConfig', (node: t.Node) => {
-      // helper that checks a MemberExpression of the form X.Y.Z.SKYBOX___SETTING
-      function matchMemberChain(expr: t.Node): boolean {
-        if (!t.isMemberExpression(expr)) return false;
-        const outer = expr as t.MemberExpression; // ... . SKYBOX___SETTING
-        if (outer.computed) return false;
-        if (!t.isIdentifier(outer.property) || outer.property.name !== 'SKYBOX___SETTING') return false;
+    // blockConfig and settings share a similar member-chain pattern; extract a small helper
+    function matchMemberChainForSkybox(expr: t.Node, capture: m.CapturedMatcher<t.Identifier>, which: 'inner' | 'mid') {
+      if (!t.isMemberExpression(expr)) return false;
+      const outer = expr as t.MemberExpression;
+      if (outer.computed) return false;
+      if (!t.isIdentifier(outer.property) || outer.property.name !== 'SKYBOX___SETTING') return false;
 
-        const mid = outer.object;
-        if (!t.isMemberExpression(mid) || mid.computed) return false;
+      const mid = outer.object;
+      if (!t.isMemberExpression(mid) || mid.computed) return false;
 
-        const inner = (mid as t.MemberExpression).object;
-        if (!t.isMemberExpression(inner) || inner.computed) return false;
+      const inner = (mid as t.MemberExpression).object;
+      if (!t.isMemberExpression(inner) || inner.computed) return false;
+
+      if (which === 'inner') {
         const innerProp = (inner as t.MemberExpression).property;
         if (!t.isIdentifier(innerProp)) return false;
-
-        // register the obfuscated inner property (e.g., "WmwwMNW")
-        blockConfigId.match(innerProp as any);
+        capture.match(innerProp as any);
+        return true;
+      } else {
+        const midProp = (mid as t.MemberExpression).property;
+        if (!t.isIdentifier(midProp)) return false;
+        capture.match(midProp as any);
         return true;
       }
+    }
 
-      // 1) If the node itself is a MemberExpression (rare for return form, but keep for completeness)
-      if (t.isMemberExpression(node)) {
-        return matchMemberChain(node);
-      }
+    const blockConfigId = register('blockConfig', (node: t.Node) => {
+      if (t.isMemberExpression(node)) return matchMemberChainForSkybox(node, blockConfigId, 'inner');
+      if (t.isReturnStatement(node) && node.argument) return matchMemberChainForSkybox(node.argument, blockConfigId, 'inner');
 
-      // 2) If the node is a ReturnStatement returning the member chain
-      if (t.isReturnStatement(node) && node.argument) {
-        if (matchMemberChain(node.argument)) return true;
-      }
-
-      // 3) Walk the subtree and look for ReturnStatement nodes (covers functions / blocks)
       let matched = false;
       walk(node, (n) => {
         if (matched) return;
         if (!t.isReturnStatement(n)) return;
         const arg = n.argument;
         if (!arg) return;
-        if (matchMemberChain(arg)) matched = true;
+        if (matchMemberChainForSkybox(arg, blockConfigId, 'inner')) matched = true;
       });
-
       return matched;
     });
 
     const settingsId = register('settings', (node: t.Node) => {
-      function matchMemberChain(expr: t.Node): boolean {
-        if (!t.isMemberExpression(expr)) return false;
-        const outer = expr as t.MemberExpression; // ... . SKYBOX___SETTING
-        if (outer.computed) return false;
-        if (!t.isIdentifier(outer.property) || outer.property.name !== 'SKYBOX___SETTING') return false;
+      if (t.isMemberExpression(node)) return matchMemberChainForSkybox(node, settingsId, 'mid');
+      if (t.isReturnStatement(node) && node.argument) return matchMemberChainForSkybox(node.argument, settingsId, 'mid');
 
-        const mid = outer.object;
-        if (!t.isMemberExpression(mid) || mid.computed) return false;
-
-        const inner = (mid as t.MemberExpression).object;
-        if (!t.isMemberExpression(inner) || inner.computed) return false;
-
-        const midProp = (mid as t.MemberExpression).property;
-        if (!t.isIdentifier(midProp)) return false;
-
-        // register the obfuscated middle property (e.g., "wwNmMWn")
-        settingsId.match(midProp as any);
-        return true;
-      }
-
-      // 1) If the node itself is a MemberExpression
-      if (t.isMemberExpression(node)) {
-        return matchMemberChain(node);
-      }
-
-      // 2) If the node is a ReturnStatement returning the member chain
-      if (t.isReturnStatement(node) && node.argument) {
-        if (matchMemberChain(node.argument)) return true;
-      }
-
-      // 3) Walk the subtree and look for ReturnStatement nodes (covers functions / blocks)
       let matched = false;
       walk(node, (n) => {
         if (matched) return;
         if (!t.isReturnStatement(n)) return;
         const arg = n.argument;
         if (!arg) return;
-        if (matchMemberChain(arg)) matched = true;
+        if (matchMemberChainForSkybox(arg, settingsId, 'mid')) matched = true;
       });
-
       return matched;
     });
 
-    const playerStateId = register('playerState', (node: t.Node) => {
-      const DIVISOR = 0.016666666666666666;
+    // playerState, weaponInventory, currentWeaponSlot share a similar pattern:
+    //  - find declarator var <local> = this.<inner>.<outer>;
+    //  - find a this.tf += ... / DIVISOR update after the declarator
+    // We implement a small factory to avoid duplication.
+    function makeTfBasedPattern(name: string, captureWhich: 'inner' | 'outer') {
+      const cap = register(name, (node: t.Node) => {
+        const DIVISOR = 0.016666666666666666;
+        const { innerProp, outerProp, declaratorNode } = findDeclaratorChain(node);
+        if (!innerProp || !outerProp || !declaratorNode) return false;
+        const declStart = getStart(declaratorNode);
+        const declEnd = getEnd(declaratorNode);
+        if (typeof declStart !== 'number' || typeof declEnd !== 'number') return false;
 
-      // helpers to safely read start/end from nodes (typed as optional numbers)
-      function getStart(n: t.Node | null | undefined): number | undefined {
-        return (n as unknown as { start?: number })?.start;
-      }
-      function getEnd(n: t.Node | null | undefined): number | undefined {
-        return (n as unknown as { end?: number })?.end;
-      }
+        const container = findSmallestContainer(node, declStart, declEnd) || node;
+        const matched = findTfUpdateAfter(container, declEnd, DIVISOR);
+        if (!matched) return false;
 
-      // 1) find a declarator: var <local> = this.<prop>;
-      let candidateProp: t.Identifier | null = null;
-      let declaratorNode: t.Node | null = null;
-      walk(node, (n) => {
-        if (candidateProp) return;
-        if (!t.isVariableDeclarator(n)) return;
-        if (!t.isIdentifier(n.id)) return;
-        const init = n.init;
-        if (!init || !t.isMemberExpression(init)) return;
-        if (init.computed) return;
-        if (!t.isThisExpression(init.object)) return;
-        if (!t.isIdentifier(init.property)) return;
-        candidateProp = init.property;
-        declaratorNode = n;
-      });
-
-      if (!candidateProp || !declaratorNode) return false;
-      const declStart = getStart(declaratorNode);
-      const declEnd = getEnd(declaratorNode);
-      if (typeof declStart !== 'number' || typeof declEnd !== 'number') return false;
-
-      // 2) find smallest enclosing container (Program / Block / Function) that contains the declarator
-      let container: t.Node | null = null;
-      let bestSize = Infinity;
-      walk(node, (n) => {
-        if (!(t.isProgram(n) || t.isBlockStatement(n) || t.isFunctionExpression(n) || t.isArrowFunctionExpression(n) || t.isFunctionDeclaration(n))) return;
-        const nStart = getStart(n);
-        const nEnd = getEnd(n);
-        if (typeof nStart !== 'number' || typeof nEnd !== 'number') return;
-        if (nStart <= declStart && nEnd >= declEnd) {
-          const size = nEnd - nStart;
-          if (size < bestSize) {
-            bestSize = size;
-            container = n;
-          }
+        if (captureWhich === 'inner') {
+          cap.match(innerProp as any);
+        } else {
+          cap.match(outerProp as any);
         }
-      });
-      const searchRoot = container || node;
-
-      // 3) helper: is binary division by the exact constant
-      function isDivByConstant(n: t.Node): n is t.BinaryExpression {
-        if (!t.isBinaryExpression(n)) return false;
-        if (n.operator !== '/') return false;
-        const right = n.right;
-        if (!t.isNumericLiteral(right)) return false;
-        return right.value === DIVISOR || String(right.value) === '0.016666666666666666';
-      }
-
-      // 4) search inside the container for a tf update that occurs after the declarator
-      let matched = false;
-      walk(searchRoot, (n) => {
-        if (matched) return;
-
-        // consider ExpressionStatement with assignment: this.tf += ...
-        if (t.isExpressionStatement(n) && t.isAssignmentExpression(n.expression)) {
-          const a = n.expression;
-          if (a.operator === '+=') {
-            const left = a.left;
-            if (t.isMemberExpression(left) && !left.computed && t.isThisExpression(left.object) && t.isIdentifier(left.property) && left.property.name === 'tf') {
-              const right = a.right;
-              if (isDivByConstant(right)) {
-                const nStart = getStart(n);
-                if (typeof nStart === 'number' && nStart > declEnd) {
-                  matched = true;
-                  return;
-                }
-              }
-            }
-          }
-        }
-
-        // also handle raw AssignmentExpression nodes (not wrapped)
-        if (t.isAssignmentExpression(n)) {
-          const a = n;
-          if (a.operator === '+=') {
-            const left = a.left;
-            if (t.isMemberExpression(left) && !left.computed && t.isThisExpression(left.object) && t.isIdentifier(left.property) && left.property.name === 'tf') {
-              const right = a.right;
-              if (isDivByConstant(right)) {
-                const nStart = getStart(n);
-                if (typeof nStart === 'number' && nStart > declEnd) {
-                  matched = true;
-                  return;
-                }
-              }
-            }
-          }
-        }
-      });
-
-      if (matched) {
-        playerStateId.match(candidateProp as any);
         return true;
-      }
+      });
+      return cap;
+    }
 
-      return false;
-    });
+    // Register the three similar patterns
+    makeTfBasedPattern('playerState', 'inner'); // original captured candidateProp
+    makeTfBasedPattern('weaponInventory', 'inner'); // inner property
+    makeTfBasedPattern('currentWeaponSlot', 'outer'); // outer property
 
-    const weaponInventoryId = register('weaponInventory', (node: t.Node) => {
+    // Replace the previous setAmmoId predicate with this version
+    const setAmmoId = register('setAmmo', (node: t.Node) => {
       const DIVISOR = 0.016666666666666666;
+      let foundInnerProp: string | null = null;
+      let foundCommitSecond: string | null = null;
 
-      function getStart(n: t.Node | null | undefined): number | undefined {
-        return (n as unknown as { start?: number })?.start;
-      }
-      function getEnd(n: t.Node | null | undefined): number | undefined {
-        return (n as unknown as { end?: number })?.end;
-      }
-
-      // 1) find a declarator: var <local> = this.<inner>.<outer>;
-      let innerProp: t.Identifier | null = null;
-      let outerProp: t.Identifier | null = null;
-      let declaratorNode: t.Node | null = null;
+      // 1) find a declarator or assignment that yields this.<inner>.<outer>
       walk(node, (n) => {
-        if (innerProp && outerProp) return;
-        if (!t.isVariableDeclarator(n)) return;
-        if (!t.isIdentifier(n.id)) return;
-        const init = n.init;
-        if (!init || !t.isMemberExpression(init)) return;
-        if (init.computed) return;
+        if (foundInnerProp) return;
+        // var la = this.WwMWNwm; OR var lb = this.WwNMWn.WwWMNmn;
+        if (t.isVariableDeclarator(n) && t.isIdentifier(n.id) && n.init && t.isMemberExpression(n.init)) {
+          const outerME = n.init;
+          if (!outerME.computed && t.isMemberExpression(outerME.object) && !outerME.object.computed) {
+            const innerME = outerME.object;
+            if (t.isThisExpression(innerME.object) && t.isIdentifier(innerME.property)) {
+              foundInnerProp = innerME.property.name;
+            }
+          } else if (!outerME.computed && t.isThisExpression(outerME.object) && t.isIdentifier(outerME.property)) {
+            // handle var la = this.WwMWNwm;
+            foundInnerProp = outerME.property.name;
+          }
+        }
 
-        const outerME = init;
-        const outer = outerME.property;
-        const innerME = outerME.object;
-        if (!t.isMemberExpression(innerME)) return;
-        if (innerME.computed) return;
-        const innerObj = innerME.object;
-        const inner = innerME.property;
-
-        if (!t.isThisExpression(innerObj)) return;
-        if (!t.isIdentifier(inner) || !t.isIdentifier(outer)) return;
-
-        innerProp = inner;
-        outerProp = outer;
-        declaratorNode = n;
+        // also accept simple assignment: la = this.X.Y
+        if (!foundInnerProp && t.isAssignmentExpression(n) && t.isMemberExpression(n.right)) {
+          const right = n.right;
+          if (!right.computed && t.isMemberExpression(right.object) && !right.object.computed) {
+            const innerME = right.object;
+            if (t.isThisExpression(innerME.object) && t.isIdentifier(innerME.property)) {
+              foundInnerProp = innerME.property.name;
+            }
+          } else if (!right.computed && t.isThisExpression(right.object) && t.isIdentifier(right.property)) {
+            foundInnerProp = right.property.name;
+          }
+        }
       });
 
-      if (!innerProp || !outerProp || !declaratorNode) return false;
-      const declStart = getStart(declaratorNode);
-      const declEnd = getEnd(declaratorNode);
-      if (typeof declStart !== 'number' || typeof declEnd !== 'number') return false;
+      if (!foundInnerProp) return false;
 
-      // 2) find smallest enclosing container (Program / Block / Function) that contains the declarator
-      let container: t.Node | null = null;
-      let bestSize = Infinity;
+      // 2) ensure there's a this.tf += <something> / DIVISOR somewhere (same container)
+      // find declarator node to compute position; fallback to node start/end if not available
+      let declNode: t.Node | null = null;
       walk(node, (n) => {
-        if (!(t.isProgram(n) || t.isBlockStatement(n) || t.isFunctionExpression(n) || t.isArrowFunctionExpression(n) || t.isFunctionDeclaration(n))) return;
-        const nStart = getStart(n);
-        const nEnd = getEnd(n);
-        if (typeof nStart !== 'number' || typeof nEnd !== 'number') return;
-        if (nStart <= declStart && nEnd >= declEnd) {
-          const size = nEnd - nStart;
-          if (size < bestSize) {
-            bestSize = size;
-            container = n;
-          }
-        }
-      });
-      const searchRoot = container || node;
-
-      // 3) helper: is binary division by the exact constant
-      function isDivByConstant(n: t.Node): n is t.BinaryExpression {
-        if (!t.isBinaryExpression(n)) return false;
-        if (n.operator !== '/') return false;
-        const right = n.right;
-        if (!t.isNumericLiteral(right)) return false;
-        return right.value === DIVISOR || String(right.value) === '0.016666666666666666';
-      }
-
-      // 4) search inside the container for a tf update that occurs after the declarator
-      let matched = false;
-      walk(searchRoot, (n) => {
-        if (matched) return;
-
-        // ExpressionStatement with assignment: this.tf += ...
-        if (t.isExpressionStatement(n) && t.isAssignmentExpression(n.expression)) {
-          const a = n.expression;
-          if (a.operator === '+=') {
-            const left = a.left;
-            if (t.isMemberExpression(left) && !left.computed && t.isThisExpression(left.object) && t.isIdentifier(left.property) && left.property.name === 'tf') {
-              const right = a.right;
-              if (isDivByConstant(right)) {
-                const nStart = getStart(n);
-                if (typeof nStart === 'number' && nStart > declEnd) {
-                  matched = true;
-                  return;
-                }
-              }
-            }
-          }
-        }
-
-        // raw AssignmentExpression nodes (not wrapped)
-        if (t.isAssignmentExpression(n)) {
-          const a = n;
-          if (a.operator === '+=') {
-            const left = a.left;
-            if (t.isMemberExpression(left) && !left.computed && t.isThisExpression(left.object) && t.isIdentifier(left.property) && left.property.name === 'tf') {
-              const right = a.right;
-              if (isDivByConstant(right)) {
-                const nStart = getStart(n);
-                if (typeof nStart === 'number' && nStart > declEnd) {
-                  matched = true;
-                  return;
-                }
-              }
-            }
+        if (declNode) return;
+        if (t.isVariableDeclarator(n) && t.isIdentifier(n.id)) {
+          const init = n.init;
+          if (init && t.isMemberExpression(init) && t.isThisExpression((init.object as any).object ?? init.object)) {
+            declNode = n;
           }
         }
       });
 
-      if (matched) {
-        weaponInventoryId.match(innerProp as any);
-        return true;
-      }
+      const declEnd = getEnd(declNode) ?? -Infinity;
+      const container = declNode && typeof getStart(declNode) === 'number' && typeof getEnd(declNode) === 'number'
+        ? (findSmallestContainer(node, getStart(declNode)!, getEnd(declNode)!) || node)
+        : node;
 
-      return false;
-    });
+      const hasTfDiv = findTfUpdateAfter(container, declEnd, DIVISOR);
+      if (!hasTfDiv) return false;
 
-    const currentWeaponSlotId = register('currentWeaponSlot', (node: t.Node) => {
-      const DIVISOR = 0.016666666666666666;
-
-      function getStart(n: t.Node | null | undefined): number | undefined {
-        return (n as unknown as { start?: number })?.start;
-      }
-      function getEnd(n: t.Node | null | undefined): number | undefined {
-        return (n as unknown as { end?: number })?.end;
-      }
-
-      // 1) find a declarator: var <local> = this.<inner>.<outer>;
-      let innerProp: t.Identifier | null = null;
-      let outerProp: t.Identifier | null = null;
-      let declaratorNode: t.Node | null = null;
+      // 3) find a commit("X/Y", ...) call and capture Y (second segment)
       walk(node, (n) => {
-        if (innerProp && outerProp) return;
-        if (!t.isVariableDeclarator(n)) return;
-        if (!t.isIdentifier(n.id)) return;
-        const init = n.init;
-        if (!init || !t.isMemberExpression(init)) return;
-        if (init.computed) return;
-
-        const outerME = init;
-        const outer = outerME.property;
-        const innerME = outerME.object;
-        if (!t.isMemberExpression(innerME)) return;
-        if (innerME.computed) return;
-        const innerObj = innerME.object;
-        const inner = innerME.property;
-
-        if (!t.isThisExpression(innerObj)) return;
-        if (!t.isIdentifier(inner) || !t.isIdentifier(outer)) return;
-
-        innerProp = inner;
-        outerProp = outer;
-        declaratorNode = n;
-      });
-
-      if (!innerProp || !outerProp || !declaratorNode) return false;
-      const declStart = getStart(declaratorNode);
-      const declEnd = getEnd(declaratorNode);
-      if (typeof declStart !== 'number' || typeof declEnd !== 'number') return false;
-
-      // 2) find smallest enclosing container (Program / Block / Function) that contains the declarator
-      let container: t.Node | null = null;
-      let bestSize = Infinity;
-      walk(node, (n) => {
-        if (!(t.isProgram(n) || t.isBlockStatement(n) || t.isFunctionExpression(n) || t.isArrowFunctionExpression(n) || t.isFunctionDeclaration(n))) return;
-        const nStart = getStart(n);
-        const nEnd = getEnd(n);
-        if (typeof nStart !== 'number' || typeof nEnd !== 'number') return;
-        if (nStart <= declStart && nEnd >= declEnd) {
-          const size = nEnd - nStart;
-          if (size < bestSize) {
-            bestSize = size;
-            container = n;
-          }
-        }
-      });
-      const searchRoot = container || node;
-
-      // 3) helper: is binary division by the exact constant
-      function isDivByConstant(n: t.Node): n is t.BinaryExpression {
-        if (!t.isBinaryExpression(n)) return false;
-        if (n.operator !== '/') return false;
-        const right = n.right;
-        if (!t.isNumericLiteral(right)) return false;
-        return right.value === DIVISOR || String(right.value) === '0.016666666666666666';
-      }
-
-      // 4) search inside the container for a tf update that occurs after the declarator
-      let matched = false;
-      walk(searchRoot, (n) => {
-        if (matched) return;
-
-        if (t.isExpressionStatement(n) && t.isAssignmentExpression(n.expression)) {
-          const a = n.expression;
-          if (a.operator === '+=') {
-            const left = a.left;
-            if (t.isMemberExpression(left) && !left.computed && t.isThisExpression(left.object) && t.isIdentifier(left.property) && left.property.name === 'tf') {
-              const right = a.right;
-              if (isDivByConstant(right)) {
-                const nStart = getStart(n);
-                if (typeof nStart === 'number' && nStart > declEnd) {
-                  matched = true;
-                  return;
-                }
-              }
-            }
-          }
-        }
-
-        if (t.isAssignmentExpression(n)) {
-          const a = n;
-          if (a.operator === '+=') {
-            const left = a.left;
-            if (t.isMemberExpression(left) && !left.computed && t.isThisExpression(left.object) && t.isIdentifier(left.property) && left.property.name === 'tf') {
-              const right = a.right;
-              if (isDivByConstant(right)) {
-                const nStart = getStart(n);
-                if (typeof nStart === 'number' && nStart > declEnd) {
-                  matched = true;
-                  return;
-                }
-              }
-            }
-          }
+        if (foundCommitSecond) return;
+        if (!t.isCallExpression(n)) return;
+        const callee = n.callee;
+        if (!t.isMemberExpression(callee)) return;
+        if (!t.isIdentifier(callee.property) || callee.property.name !== 'commit') return;
+        const args = n.arguments;
+        if (!args || args.length === 0) return;
+        const first = args[0];
+        if (!t.isStringLiteral(first)) return;
+        const parts = first.value.split('/');
+        if (parts.length < 2) return;
+        const second = parts[1];
+        if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(second)) {
+          foundCommitSecond = second;
         }
       });
 
-      if (matched) {
-        currentWeaponSlotId.match(outerProp as any);
-        return true;
-      }
+      if (!foundCommitSecond) return false;
 
-      return false;
+      // commit the captured second segment as the obfuscated name
+      setAmmoId.match(t.identifier(foundCommitSecond) as any);
+      return true;
     });
 
 
+    /* Capture results and emit at Program exit */
     const discovered = new Map<string, string>();
 
     function tryCapture(node: t.Node) {
