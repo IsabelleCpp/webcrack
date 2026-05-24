@@ -1095,6 +1095,71 @@ export default {
       return true;
     });
 
+    // capture the fireFrames property name (e.g. "WwMnwNW")
+    const fireFrames = register('fireFrames', (node: t.Node) => {
+      // 1) find declarator like: var hH = f5.a[hG];
+      let cfgName: string | null = null;
+      let cfgDeclarator: t.Node | null = null;
+
+      walk(node, (n) => {
+        if (cfgName) return;
+        if (!t.isVariableDeclarator(n)) return;
+        if (!t.isIdentifier(n.id)) return;
+        const init = n.init;
+        if (!init || !t.isMemberExpression(init)) return;
+        // expect computed access like f5.a[hG]
+        if (!init.computed) return;
+        cfgName = n.id.name;
+        cfgDeclarator = n;
+      });
+
+      if (!cfgName || !cfgDeclarator) return false;
+
+      // 2) restrict to smallest container around the cfg declarator
+      const declStart = getStart(cfgDeclarator);
+      const declEnd = getEnd(cfgDeclarator);
+      const searchRoot = (typeof declStart === 'number' && typeof declEnd === 'number')
+        ? (findSmallestContainer(node, declStart, declEnd) || node)
+        : node;
+
+      // 3) require this.tf += 1 after the declarator in the same container
+      const declEndPos = typeof declEnd === 'number' ? declEnd : -Infinity;
+      if (!findTfUpdateAfter(searchRoot, declEndPos)) return false;
+
+      // 4) find comparison: this.tf > hH.<prop>  (or reversed)
+      let foundPropName: string | null = null;
+
+      walk(searchRoot, (n) => {
+        if (foundPropName) return;
+
+        if (t.isBinaryExpression(n) && ['>', '>='].includes(n.operator)) {
+          const left = n.left;
+          const right = n.right;
+
+          // left: this.tf, right: hH.<prop>
+          if (t.isMemberExpression(left) && !left.computed && t.isThisExpression(left.object) && t.isIdentifier(left.property) && left.property.name === 'tf') {
+            if (t.isMemberExpression(right) && !right.computed && t.isIdentifier(right.object) && right.object.name === cfgName && t.isIdentifier(right.property)) {
+              foundPropName = right.property.name;
+              return;
+            }
+          }
+
+          // reversed: hH.<prop> < this.tf
+          if (t.isMemberExpression(right) && !right.computed && t.isThisExpression(right.object) && t.isIdentifier(right.property) && right.property.name === 'tf') {
+            if (t.isMemberExpression(left) && !left.computed && t.isIdentifier(left.object) && left.object.name === cfgName && t.isIdentifier(left.property)) {
+              foundPropName = left.property.name;
+              return;
+            }
+          }
+        }
+      });
+
+      if (!foundPropName) return false;
+
+      // 5) capture the property name as a synthetic identifier so discovered map stores the token
+      fireFrames.match(t.identifier(foundPropName) as any);
+      return true;
+    });
 
 
 
