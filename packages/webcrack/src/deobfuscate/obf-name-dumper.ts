@@ -678,6 +678,86 @@ export default {
       return true;
     });
 
+    // weaponSlots pattern: capture the property name used as alias.<prop>[index].nested
+    const weaponSlotsId = register('weaponSlots', (node: t.Node) => {
+      // 1) find alias declarator: var <alias> = this.<...>;
+      let aliasName: string | null = null;
+      let declaratorNode: t.Node | null = null;
+
+      walk(node, (n) => {
+        if (aliasName) return;
+        if (!t.isVariableDeclarator(n)) return;
+        if (!t.isIdentifier(n.id)) return;
+        const init = n.init;
+        if (!init || !t.isMemberExpression(init)) return;
+        if (init.computed) return;
+
+        // handle var la = this.X  OR var la = this.X.Y
+        if (t.isThisExpression(init.object)) {
+          aliasName = n.id.name;
+          declaratorNode = n;
+          return;
+        }
+        if (t.isMemberExpression(init.object) && t.isThisExpression((init.object as t.MemberExpression).object)) {
+          aliasName = n.id.name;
+          declaratorNode = n;
+          return;
+        }
+      });
+
+      if (!aliasName || !declaratorNode) return false;
+
+      // 2) restrict search to smallest container around the declarator
+      const declStart = getStart(declaratorNode);
+      const declEnd = getEnd(declaratorNode);
+      const searchRoot = (typeof declStart === 'number' && typeof declEnd === 'number')
+        ? (findSmallestContainer(node, declStart, declEnd) || node)
+        : node;
+
+      // 3) look for alias.<prop>[index].<nested> (assignment or read)
+      //    require: outermost is MemberExpression with non-computed property (nested),
+      //    its object is a computed MemberExpression (array access),
+      //    and that object's object is a MemberExpression of form alias.<prop>
+      let foundProp: t.Identifier | null = null;
+      walk(searchRoot, (n) => {
+        if (foundProp) return;
+
+        if (!t.isMemberExpression(n)) return;
+        const outer = n; // expected: (alias.prop)[index].nested  -> outer.property is nested
+        if (outer.computed) return; // nested must be non-computed (identifier)
+        if (!t.isIdentifier(outer.property)) return;
+
+        const maybeArrayAccess = outer.object;
+        if (!t.isMemberExpression(maybeArrayAccess) || !maybeArrayAccess.computed) return; // must be computed array access
+
+        const arrayObj = maybeArrayAccess.object; // expected alias.prop
+        if (!t.isMemberExpression(arrayObj) || arrayObj.computed) return;
+        const obj = arrayObj.object;
+        const prop = arrayObj.property;
+        if (!t.isIdentifier(prop)) return;
+
+        // obj should be the alias identifier
+        if (t.isIdentifier(obj) && obj.name === aliasName) {
+          foundProp = prop;
+          return;
+        }
+
+        // also accept alias nested one level deeper: alias.someObj.prop[index].nested
+        // walk up one more level if needed
+        if (t.isMemberExpression(obj) && t.isIdentifier((obj as t.MemberExpression).object) && ((obj as t.MemberExpression).object as t.Identifier).name === aliasName) {
+          const deeperProp = (obj as t.MemberExpression).property;
+          if (t.isIdentifier(deeperProp)) {
+            foundProp = deeperProp;
+            return;
+          }
+        }
+      });
+
+      if (!foundProp) return false;
+
+      weaponSlotsId.match(foundProp as any);
+      return true;
+    });
 
     /* Capture results and emit at Program exit */
     const discovered = new Map<string, string>();
