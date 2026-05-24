@@ -881,6 +881,148 @@ export default {
       return true;
     });
 
+    // maxAmmo pattern: capture property used as `var ld = lc.<maxAmmo>`
+    // using invariants: la.state = "idle", ic.a.commit(..., uses ld), this.tf = 0,
+    // and a computed-slot assignment whose RHS is ld and whose root object is la.
+    const maxAmmoId = register('maxAmmo', (node: t.Node) => {
+      let ldName: string | null = null;
+      let foundProp: t.Identifier | null = null;
+      let lcName: string | null = null;
+
+      // 1) find `var ld = lc.<prop>` and record ldName, foundProp, lcName
+      walk(node, (n) => {
+        if (foundProp) return;
+        if (!t.isVariableDeclarator(n)) return;
+        if (!t.isIdentifier(n.id)) return;
+        const init = n.init;
+        if (!init || !t.isMemberExpression(init)) return;
+        if (init.computed) return; // expect property access, not index
+        const obj = init.object;
+        const prop = init.property;
+        if (!t.isIdentifier(prop)) return;
+        // record direct lc.prop case
+        if (t.isIdentifier(obj)) {
+          ldName = n.id.name;
+          foundProp = prop;
+          lcName = obj.name;
+          return;
+        }
+        // accept deeper: ld = (lc.something).prop
+        if (t.isMemberExpression(obj)) {
+          // find root identifier of obj
+          let root: t.Node = obj;
+          while (t.isMemberExpression(root) && !t.isIdentifier((root as t.MemberExpression).object)) {
+            root = (root as t.MemberExpression).object as any;
+          }
+          const rootObj = (root as t.MemberExpression).object ?? null;
+          if (t.isIdentifier(rootObj)) {
+            ldName = n.id.name;
+            foundProp = prop;
+            lcName = rootObj.name;
+            return;
+          }
+        }
+      });
+
+      if (!foundProp || !ldName) return false;
+
+      // 2) find la identifier from `la.state = "idle"` (record laName)
+      let laName: string | null = null;
+      walk(node, (n) => {
+        if (laName) return;
+        if (!t.isAssignmentExpression(n) || n.operator !== '=') return;
+        const left = n.left;
+        const right = n.right;
+        if (!t.isMemberExpression(left) || left.computed) return;
+        if (!t.isIdentifier(left.property) || left.property.name !== 'state') return;
+        if (!t.isStringLiteral(right) || right.value !== 'idle') return;
+        const obj = left.object;
+        if (t.isIdentifier(obj)) laName = obj.name;
+        // also accept deeper: (something).state = "idle" where root is identifier
+        if (t.isMemberExpression(obj)) {
+          let root: t.Node = obj;
+          while (t.isMemberExpression(root) && !t.isIdentifier((root as t.MemberExpression).object)) {
+            root = (root as t.MemberExpression).object as any;
+          }
+          const rootObj = (root as t.MemberExpression).object ?? null;
+          if (t.isIdentifier(rootObj)) laName = rootObj.name;
+        }
+      });
+
+      if (!laName) return false;
+
+      // 3) require `this.tf = 0` somewhere in same subtree
+      let sawThisTfZero = false;
+      walk(node, (n) => {
+        if (sawThisTfZero) return;
+        if (!t.isAssignmentExpression(n) || n.operator !== '=') return;
+        const left = n.left;
+        const right = n.right;
+        if (!t.isMemberExpression(left) || left.computed) return;
+        if (!t.isThisExpression(left.object)) return;
+        if (!t.isIdentifier(left.property) || left.property.name !== 'tf') return;
+        if (t.isNumericLiteral(right) && right.value === 0) sawThisTfZero = true;
+      });
+      if (!sawThisTfZero) return false;
+
+      // 4) require a commit call that references ldName in its args
+      let sawCommitUsingLd = false;
+      walk(node, (n) => {
+        if (sawCommitUsingLd) return;
+        if (!t.isCallExpression(n)) return;
+        const callee = n.callee;
+        if (!t.isMemberExpression(callee) || callee.computed) return;
+        if (!t.isIdentifier(callee.property) || callee.property.name !== 'commit') return;
+        for (const arg of n.arguments) {
+          let foundLdInArg = false;
+          walk(arg as any, (sub) => {
+            if (foundLdInArg) return;
+            if (t.isIdentifier(sub) && sub.name === ldName) foundLdInArg = true;
+          });
+          if (foundLdInArg) {
+            sawCommitUsingLd = true;
+            break;
+          }
+        }
+      });
+      if (!sawCommitUsingLd) return false;
+
+      // 5) find assignment where RHS === ldName and left is a member chain rooted at laName
+      //    and the left chain contains at least one computed member (the [lb] index).
+      let sawSlotAssignWithLd = false;
+      walk(node, (n) => {
+        if (sawSlotAssignWithLd) return;
+        if (!t.isAssignmentExpression(n) || n.operator !== '=') return;
+        const right = n.right;
+        if (!t.isIdentifier(right) || right.name !== ldName) return;
+        const left = n.left;
+        if (!t.isMemberExpression(left)) return;
+        // ensure left chain is rooted at laName
+        let cur: t.Node | null = left;
+        let rootFound = false;
+        let hasComputed = false;
+        while (t.isMemberExpression(cur)) {
+          if (cur.computed) {
+            // computed index found
+            hasComputed = true;
+            // check if the computed property's expression contains an identifier (index) - not required to match a name
+          }
+          const obj = cur.object;
+          if (t.isIdentifier(obj) && obj.name === laName) {
+            rootFound = true;
+            break;
+          }
+          cur = obj as any;
+        }
+        if (rootFound && hasComputed) sawSlotAssignWithLd = true;
+      });
+      if (!sawSlotAssignWithLd) return false;
+
+      // 6) all invariants satisfied -> capture the property on lc as maxAmmo
+      maxAmmoId.match(foundProp as any);
+      return true;
+    });
+
     /* Capture results and emit at Program exit */
     const discovered = new Map<string, string>();
 
