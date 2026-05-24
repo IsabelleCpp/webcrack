@@ -1018,6 +1018,86 @@ export default {
       return true;
     });
 
+    // capture the state string literal used for the "firing" state
+    const firingId = register('firing', (node: t.Node) => {
+      // find local alias declarator: var <alias> = this.<...>
+      let aliasName: string | null = null;
+      let aliasDeclarator: t.Node | null = null;
+
+      walk(node, (n) => {
+        if (aliasName) return;
+        if (!t.isVariableDeclarator(n)) return;
+        if (!t.isIdentifier(n.id)) return;
+        const init = n.init;
+        if (!init || !t.isMemberExpression(init)) return;
+        if (init.computed) return;
+        if (t.isThisExpression(init.object) || (t.isMemberExpression(init.object) && t.isThisExpression((init.object as t.MemberExpression).object))) {
+          aliasName = n.id.name;
+          aliasDeclarator = n;
+        }
+      });
+
+      if (!aliasName || !aliasDeclarator) return false;
+
+      // restrict to smallest container and require this.tf += 1 after the declarator
+      const declStart = getStart(aliasDeclarator);
+      const declEnd = getEnd(aliasDeclarator);
+      const searchRoot = (typeof declStart === 'number' && typeof declEnd === 'number')
+        ? (findSmallestContainer(node, declStart, declEnd) || node)
+        : node;
+
+      const declEndPos = typeof declEnd === 'number' ? declEnd : -Infinity;
+      if (!findTfUpdateAfter(searchRoot, declEndPos)) return false;
+
+      // look for comparisons/assignments that use <alias>.state and a string literal
+      let foundState: string | null = null;
+
+      function rootIdentifierIfState(me: t.MemberExpression) {
+        if (me.computed) return null;
+        if (!t.isIdentifier(me.property) || me.property.name !== 'state') return null;
+        const obj = me.object;
+        if (t.isIdentifier(obj)) return obj;
+        return null;
+      }
+
+      walk(searchRoot, (n) => {
+        if (foundState) return;
+
+        // comparisons: <alias>.state === "X"  or "X" === <alias>.state
+        if (t.isBinaryExpression(n) && ['===', '==', '!==', '!='].includes(n.operator)) {
+          const left = n.left;
+          const right = n.right;
+          if (t.isMemberExpression(left) && t.isStringLiteral(right)) {
+            const id = rootIdentifierIfState(left);
+            if (id && id.name === aliasName) foundState = right.value;
+          } else if (t.isStringLiteral(left) && t.isMemberExpression(right)) {
+            const id = rootIdentifierIfState(right);
+            if (id && id.name === aliasName) foundState = left.value;
+          }
+          return;
+        }
+
+        // assignment: <alias>.state = "X"
+        if (t.isAssignmentExpression(n) && n.operator === '=') {
+          const left = n.left;
+          const right = n.right;
+          if (t.isMemberExpression(left) && t.isStringLiteral(right)) {
+            const id = rootIdentifierIfState(left);
+            if (id && id.name === aliasName) foundState = right.value;
+          }
+          return;
+        }
+      });
+
+      if (!foundState) return false;
+
+      firingId.match(t.identifier(foundState) as any);
+      return true;
+    });
+
+
+
+
     /* Capture results and emit at Program exit */
     const discovered = new Map<string, string>();
 
