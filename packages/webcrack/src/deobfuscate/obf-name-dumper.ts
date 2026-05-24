@@ -759,6 +759,128 @@ export default {
       return true;
     });
 
+    // ammo pattern: capture the property that is decremented on a slot alias (lf.<ammo>--)
+    // and that appears in the same scope alongside an assignment of Date.now() to some property of lf.
+    // This version does NOT assume any obfuscated names are equal.
+    const ammoId = register('ammo', (node: t.Node) => {
+      // 1) find alias declarator: var <alias> = this.<...>;
+      let aliasName: string | null = null;
+      let aliasDeclarator: t.Node | null = null;
+      walk(node, (n) => {
+        if (aliasName) return;
+        if (!t.isVariableDeclarator(n)) return;
+        if (!t.isIdentifier(n.id)) return;
+        const init = n.init;
+        if (!init || !t.isMemberExpression(init)) return;
+        if (init.computed) return;
+        if (t.isThisExpression(init.object) || (t.isMemberExpression(init.object) && t.isThisExpression((init.object as t.MemberExpression).object))) {
+          aliasName = n.id.name;
+          aliasDeclarator = n;
+        }
+      });
+      if (!aliasName || !aliasDeclarator) return false;
+
+      // 2) find a slot alias declarator: var <slotAlias> = <alias>.<slots>[index]  OR var <slotAlias> = <alias>.<slots>[index].something
+      let slotAliasName: string | null = null;
+      let slotDeclarator: t.Node | null = null;
+      walk(node, (n) => {
+        if (slotAliasName) return;
+        if (!t.isVariableDeclarator(n)) return;
+        if (!t.isIdentifier(n.id)) return;
+        const init = n.init;
+        if (!init || !t.isMemberExpression(init)) return;
+        // Expect computed access (array index) somewhere in the chain
+        // e.g., la.WwMmNnw[lb]  -> init.computed === true and init.object is MemberExpression(la.WwMmNnw)
+        if (init.computed && t.isMemberExpression(init.object) && !init.object.computed) {
+          const arrayObj = init.object;
+          const obj = arrayObj.object;
+          if (t.isIdentifier(obj) && obj.name === aliasName) {
+            slotAliasName = n.id.name;
+            slotDeclarator = n;
+            return;
+          }
+          // deeper chain: this.X.Y.Z[index]
+          if (t.isMemberExpression(obj)) {
+            let root = obj;
+            while (t.isMemberExpression(root) && !t.isIdentifier(root.object)) root = root.object as any;
+            if (t.isIdentifier((root as any).object) && ((root as any).object as t.Identifier).name === aliasName) {
+              slotAliasName = n.id.name;
+              slotDeclarator = n;
+              return;
+            }
+          }
+        }
+        // also accept var lf = la.someSlots (non-indexed) as fallback
+        if (!slotAliasName && t.isMemberExpression(init) && !init.computed) {
+          const obj = init.object;
+          if (t.isIdentifier(obj) && obj.name === aliasName) {
+            slotAliasName = n.id.name;
+            slotDeclarator = n;
+            return;
+          }
+        }
+      });
+      if (!slotAliasName || !slotDeclarator) return false;
+
+      // 3) restrict search to smallest container around the slot declarator
+      const declStart = getStart(slotDeclarator);
+      const declEnd = getEnd(slotDeclarator);
+      const searchRoot = (typeof declStart === 'number' && typeof declEnd === 'number')
+        ? (findSmallestContainer(node, declStart, declEnd) || node)
+        : node;
+
+      // 4) look for two independent structural signals on the slot alias:
+      //    A) an UpdateExpression (-- or ++) where argument is MemberExpression with object === slotAliasName
+      //    B) an AssignmentExpression where left is MemberExpression with object === slotAliasName and right is Date.now() call
+      let foundDecrementProp: t.Identifier | null = null;
+      let sawDateNowAssign = false;
+
+      walk(searchRoot, (n) => {
+        if (foundDecrementProp && sawDateNowAssign) return;
+
+        // A) decrement: lf.<prop>--  (UpdateExpression)
+        if (!foundDecrementProp && t.isUpdateExpression(n) && n.operator === '--') {
+          const arg = n.argument;
+          if (t.isMemberExpression(arg) && !arg.computed && t.isIdentifier(arg.object) && arg.object.name === slotAliasName && t.isIdentifier(arg.property)) {
+            foundDecrementProp = arg.property;
+          }
+        }
+
+        // also accept postfix decrement expressed as assignment: lf.<prop> = lf.<prop> - 1
+        if (!foundDecrementProp && t.isAssignmentExpression(n) && n.operator === '=') {
+          if (t.isMemberExpression(n.left) && !n.left.computed && t.isIdentifier(n.left.object) && n.left.object.name === slotAliasName) {
+            const leftProp = n.left.property;
+            if (t.isIdentifier(leftProp) && t.isBinaryExpression(n.right) && n.right.operator === '-' && t.isNumericLiteral(n.right.right) && n.right.right.value === 1) {
+              // ensure right side references same property name (optional but common)
+              if (t.isMemberExpression(n.right.left) && t.isIdentifier(n.right.left.object) && n.right.left.object.name === slotAliasName && t.isIdentifier(n.right.left.property) && n.right.left.property.name === leftProp.name) {
+                foundDecrementProp = leftProp;
+              } else {
+                // still accept if structure matches but names differ (we don't assume equality)
+                foundDecrementProp = leftProp;
+              }
+            }
+          }
+        }
+
+        // B) Date.now assignment: lf.<anyProp> = Date.now()
+        if (!sawDateNowAssign && t.isAssignmentExpression(n) && n.operator === '=') {
+          if (t.isMemberExpression(n.left) && !n.left.computed && t.isIdentifier(n.left.object) && n.left.object.name === slotAliasName) {
+            const right = n.right;
+            if (t.isCallExpression(right) && t.isMemberExpression(right.callee) && t.isIdentifier(right.callee.object) && right.callee.object.name === 'Date' && t.isIdentifier(right.callee.property) && right.callee.property.name === 'now') {
+              sawDateNowAssign = true;
+            }
+          }
+        }
+      });
+
+      // require both signals to reduce false positives
+      if (!foundDecrementProp || !sawDateNowAssign) return false;
+
+      // 5) capture the decremented property as ammo (no assumptions about other names)
+      ammoId.match(foundDecrementProp as any);
+      return true;
+    });
+
     /* Capture results and emit at Program exit */
     const discovered = new Map<string, string>();
 
