@@ -197,17 +197,14 @@ function findDeclaratorChain(root: t.Node) {
   return { innerProp, outerProp, declaratorNode };
 }
 
-/* Check for division by a specific numeric constant */
-function isDivByConstant(n: t.Node, value: number) {
-  if (!t.isBinaryExpression(n)) return false;
-  if (n.operator !== '/') return false;
-  const right = n.right;
-  if (!t.isNumericLiteral(right)) return false;
-  return right.value === value || String(right.value) === String(value);
+/* New helper: check for numeric literal 1 (this.tf += 1) */
+function isNumericOne(n: t.Node) {
+  if (t.isNumericLiteral(n)) return n.value === 1;
+  return false;
 }
 
-/* Search for a this.tf += <expr> / DIVISOR update that occurs after a given position */
-function findTfUpdateAfter(root: t.Node, afterPos: number, divisor: number) {
+/* Search for a this.tf += 1 update that occurs after a given position */
+function findTfUpdateAfter(root: t.Node, afterPos: number) {
   let found = false;
   walk(root, (n) => {
     if (found) return;
@@ -217,7 +214,7 @@ function findTfUpdateAfter(root: t.Node, afterPos: number, divisor: number) {
       if (a.operator === '+=') {
         const left = a.left;
         if (t.isMemberExpression(left) && !left.computed && t.isThisExpression(left.object) && t.isIdentifier(left.property) && left.property.name === 'tf') {
-          if (isDivByConstant(a.right, divisor)) {
+          if (isNumericOne(a.right)) {
             const nStart = getStart(n);
             if (typeof nStart === 'number' && nStart > afterPos) found = true;
           }
@@ -228,7 +225,7 @@ function findTfUpdateAfter(root: t.Node, afterPos: number, divisor: number) {
     if (t.isAssignmentExpression(n) && n.operator === '+=') {
       const left = n.left;
       if (t.isMemberExpression(left) && !left.computed && t.isThisExpression(left.object) && t.isIdentifier(left.property) && left.property.name === 'tf') {
-        if (isDivByConstant(n.right, divisor)) {
+        if (isNumericOne(n.right)) {
           const nStart = getStart(n);
           if (typeof nStart === 'number' && nStart > afterPos) found = true;
         }
@@ -562,11 +559,10 @@ export default {
 
     // playerState, weaponInventory, currentWeaponSlot share a similar pattern:
     //  - find declarator var <local> = this.<inner>.<outer>;
-    //  - find a this.tf += ... / DIVISOR update after the declarator
+    //  - find a this.tf += 1 update after the declarator
     // We implement a small factory to avoid duplication.
     function makeTfBasedPattern(name: string, captureWhich: 'inner' | 'outer') {
       const cap = register(name, (node: t.Node) => {
-        const DIVISOR = 0.016666666666666666;
         const { innerProp, outerProp, declaratorNode } = findDeclaratorChain(node);
         if (!innerProp || !outerProp || !declaratorNode) return false;
         const declStart = getStart(declaratorNode);
@@ -574,7 +570,7 @@ export default {
         if (typeof declStart !== 'number' || typeof declEnd !== 'number') return false;
 
         const container = findSmallestContainer(node, declStart, declEnd) || node;
-        const matched = findTfUpdateAfter(container, declEnd, DIVISOR);
+        const matched = findTfUpdateAfter(container, declEnd);
         if (!matched) return false;
 
         if (captureWhich === 'inner') {
@@ -594,7 +590,6 @@ export default {
 
     // Replace the previous setAmmoId predicate with this version
     const setAmmoId = register('setAmmo', (node: t.Node) => {
-      const DIVISOR = 0.016666666666666666;
       let foundInnerProp: string | null = null;
       let foundCommitSecond: string | null = null;
 
@@ -631,7 +626,7 @@ export default {
 
       if (!foundInnerProp) return false;
 
-      // 2) ensure there's a this.tf += <something> / DIVISOR somewhere (same container)
+      // 2) ensure there's a this.tf += 1 somewhere (same container)
       // find declarator node to compute position; fallback to node start/end if not available
       let declNode: t.Node | null = null;
       walk(node, (n) => {
@@ -649,8 +644,8 @@ export default {
         ? (findSmallestContainer(node, getStart(declNode)!, getEnd(declNode)!) || node)
         : node;
 
-      const hasTfDiv = findTfUpdateAfter(container, declEnd, DIVISOR);
-      if (!hasTfDiv) return false;
+      const hasTfInc = findTfUpdateAfter(container, declEnd);
+      if (!hasTfInc) return false;
 
       // 3) find a commit("X/Y", ...) call and capture Y (second segment)
       walk(node, (n) => {
