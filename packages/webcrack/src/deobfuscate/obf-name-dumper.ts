@@ -1266,6 +1266,58 @@ export default {
       return true;
     });
 
+    // reloadTimer pattern: capture property assigned 0 (e.g., hF.wNnmwMW = 0)
+    // and require this.tf = 0 somewhere in the same smallest container.
+    const reloadTimerId = register('reloadTimer', (node: t.Node) => {
+      let foundProp: t.Identifier | null = null;
+      let foundObjName: string | null = null;
+      let assignNode: t.Node | null = null;
+
+      // 1) find direct assignment like hF.wNnmwMW = 0
+      walk(node, (n) => {
+        if (foundProp) return;
+        if (!t.isAssignmentExpression(n) || n.operator !== '=') return;
+        const left = n.left;
+        const right = n.right;
+        if (!t.isMemberExpression(left) || left.computed) return;
+        if (!t.isIdentifier(left.property)) return;
+        if (!t.isNumericLiteral(right) || right.value !== 0) return;
+
+        // record property and object root name (if available)
+        foundProp = left.property;
+        const obj = left.object;
+        if (t.isIdentifier(obj)) foundObjName = obj.name;
+        assignNode = n;
+      });
+
+      if (!foundProp || !assignNode) return false;
+
+      // 2) restrict search to smallest container around the assignment
+      const start = getStart(assignNode);
+      const end = getEnd(assignNode);
+      const searchRoot = (typeof start === 'number' && typeof end === 'number')
+        ? (findSmallestContainer(node, start, end) || node)
+        : node;
+
+      // 3) require a this.tf = 0 assignment somewhere in the same container
+      let sawThisTfZero = false;
+      walk(searchRoot, (n) => {
+        if (sawThisTfZero) return;
+        if (!t.isAssignmentExpression(n) || n.operator !== '=') return;
+        const left = n.left;
+        const right = n.right;
+        if (!t.isMemberExpression(left) || left.computed) return;
+        if (!t.isThisExpression(left.object)) return;
+        if (!t.isIdentifier(left.property) || left.property.name !== 'tf') return;
+        if (t.isNumericLiteral(right) && right.value === 0) sawThisTfZero = true;
+      });
+
+      if (!sawThisTfZero) return false;
+
+      // 4) capture the property name
+      reloadTimerId.match(foundProp as any);
+      return true;
+    });
 
     /* Capture results and emit at Program exit */
     const discovered = new Map<string, string>();
