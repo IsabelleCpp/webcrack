@@ -1161,6 +1161,110 @@ export default {
       return true;
     });
 
+    // Replace previous CombatController_update predicate with this stricter version
+    const combatUpdateId = register('CombatController_update', (node: t.Node) => {
+      let foundName: string | null = null;
+
+      function fnHasTfInc(fnNode: t.FunctionExpression | t.ArrowFunctionExpression) {
+        const fnBody = fnNode.body;
+        const searchBody = t.isBlockStatement(fnBody) ? fnBody : t.blockStatement([t.returnStatement(fnBody as any)]);
+        let sawTfInc = false;
+        walk(searchBody, (sub) => {
+          if (sawTfInc) return;
+          if (t.isExpressionStatement(sub) && t.isAssignmentExpression(sub.expression)) {
+            const a = sub.expression;
+            if (a.operator === '+=') {
+              const left = a.left;
+              if (t.isMemberExpression(left) && !left.computed && t.isThisExpression(left.object) && t.isIdentifier(left.property) && left.property.name === 'tf') {
+                if (isNumericOne(a.right)) sawTfInc = true;
+              }
+            }
+          }
+          if (!sawTfInc && t.isAssignmentExpression(sub) && sub.operator === '+=') {
+            const left = sub.left;
+            if (t.isMemberExpression(left) && !left.computed && t.isThisExpression(left.object) && t.isIdentifier(left.property) && left.property.name === 'tf') {
+              if (isNumericOne(sub.right)) sawTfInc = true;
+            }
+          }
+        });
+        return sawTfInc;
+      }
+
+      // Only inspect arrays (descriptor arrays) — do NOT inspect arbitrary object expressions.
+      walk(node, (n) => {
+        if (foundName) return;
+
+        if (!t.isArrayExpression(n)) return;
+
+        for (const el of n.elements) {
+          if (!el || !t.isObjectExpression(el)) continue;
+
+          // Find the function value inside the descriptor and the descriptor's 'key' property
+          let descriptorFn: t.FunctionExpression | t.ArrowFunctionExpression | null = null;
+          let descriptorKeyNode: t.Node | null = null;
+
+          for (const prop of el.properties) {
+            if (!prop) continue;
+            // property key (could be Identifier or StringLiteral)
+            const k = (prop as any).key as t.Node | null;
+            const v = (prop as any).value ?? prop;
+
+            // explicit 'value' property -> function
+            if (k && ((t.isIdentifier(k) && k.name === 'value') || (t.isStringLiteral(k) && k.value === 'value'))) {
+              if (t.isFunctionExpression(v) || t.isArrowFunctionExpression(v) || prop.type === 'ObjectMethod') {
+                descriptorFn = v as any;
+              }
+            }
+
+            // explicit 'key' property -> its value node (string literal or identifier)
+            if (k && ((t.isIdentifier(k) && k.name === 'key') || (t.isStringLiteral(k) && k.value === 'key'))) {
+              const valNode = (prop as any).value;
+              if (valNode) descriptorKeyNode = valNode;
+            }
+          }
+
+          // fallback: if no explicit 'value' property, pick any function property in the descriptor
+          if (!descriptorFn) {
+            for (const prop of el.properties) {
+              const v = (prop as any).value ?? prop;
+              if (t.isFunctionExpression(v) || t.isArrowFunctionExpression(v) || prop.type === 'ObjectMethod') {
+                descriptorFn = v as any;
+                break;
+              }
+            }
+          }
+
+          if (!descriptorFn) continue;
+          if (!fnHasTfInc(descriptorFn)) continue;
+
+          // If we have an explicit descriptorKeyNode (from key: "..."), use it.
+          if (descriptorKeyNode) {
+            if (t.isStringLiteral(descriptorKeyNode)) foundName = descriptorKeyNode.value;
+            else if (t.isIdentifier(descriptorKeyNode)) foundName = descriptorKeyNode.name;
+            else if (t.isNumericLiteral(descriptorKeyNode)) foundName = String(descriptorKeyNode.value);
+          } else {
+            // Otherwise, try to find the property in this descriptor whose value equals descriptorFn
+            for (const prop of el.properties) {
+              const k = (prop as any).key as t.Node | null;
+              const v = (prop as any).value ?? prop;
+              if (v === descriptorFn) {
+                if (t.isIdentifier(k)) foundName = k.name;
+                else if (t.isStringLiteral(k)) foundName = k.value;
+                else if (t.isNumericLiteral(k)) foundName = String(k.value);
+                break;
+              }
+            }
+          }
+
+          if (foundName) break;
+        }
+      });
+
+      if (!foundName) return false;
+
+      combatUpdateId.match(t.identifier(foundName) as any);
+      return true;
+    });
 
 
     /* Capture results and emit at Program exit */
