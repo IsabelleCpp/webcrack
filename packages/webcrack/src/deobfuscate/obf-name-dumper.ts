@@ -1319,6 +1319,77 @@ export default {
       return true;
     });
 
+    // swapTimer pattern: capture property incremented when hF.state === "swap"
+    const swapTimerId = register('swapTimer', (node: t.Node) => {
+      let foundProp: t.Identifier | null = null;
+      let foundObjName: string | null = null;
+
+      // 1) find IfStatement with test like hF.state === "swap"
+      walk(node, (n) => {
+        if (foundProp) return;
+
+        if (!t.isIfStatement(n)) return;
+        const test = n.test;
+        if (!t.isBinaryExpression(test) || test.operator !== '===') return;
+
+        // left must be MemberExpression hF.state (non-computed)
+        const left = test.left;
+        const right = test.right;
+        if (!t.isMemberExpression(left) || left.computed) return;
+        if (!t.isIdentifier(left.property) || left.property.name !== 'state') return;
+        if (!t.isStringLiteral(right) || right.value !== 'swap') return;
+
+        // capture the object identifier name (hF)
+        const obj = left.object;
+        if (!t.isIdentifier(obj)) return;
+        const objName = obj.name;
+
+        // 2) search inside the consequent for hF.<prop> += <something>
+        const searchRoot = n.consequent;
+        walk(searchRoot, (inner) => {
+          if (foundProp) return;
+
+          // match assignment with +=
+          if (t.isExpressionStatement(inner) && t.isAssignmentExpression(inner.expression)) {
+            const a = inner.expression;
+            if (a.operator !== '+=') return;
+            const L = a.left;
+            const R = a.right;
+            if (!t.isMemberExpression(L) || L.computed) return;
+            if (!t.isIdentifier(L.property)) return;
+            // object must be the same identifier (hF)
+            if (!t.isIdentifier(L.object) || L.object.name !== objName) return;
+            // right side should be an identifier or numeric literal (allow identifier like hE)
+            if (!(t.isIdentifier(R) || t.isNumericLiteral(R))) return;
+
+            foundProp = L.property;
+            foundObjName = objName;
+            return;
+          }
+
+          // also accept raw AssignmentExpression nodes (not wrapped in ExpressionStatement)
+          if (t.isAssignmentExpression(inner) && inner.operator === '+=') {
+            const L = inner.left;
+            const R = inner.right;
+            if (!t.isMemberExpression(L) || L.computed) return;
+            if (!t.isIdentifier(L.property)) return;
+            if (!t.isIdentifier(L.object) || L.object.name !== objName) return;
+            if (!(t.isIdentifier(R) || t.isNumericLiteral(R))) return;
+
+            foundProp = L.property;
+            foundObjName = objName;
+            return;
+          }
+        });
+      });
+
+      if (!foundProp) return false;
+
+      // commit the captured property identifier
+      swapTimerId.match(foundProp as any);
+      return true;
+    });
+
     /* Capture results and emit at Program exit */
     const discovered = new Map<string, string>();
 
