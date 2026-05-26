@@ -1390,6 +1390,64 @@ export default {
       return true;
     });
 
+    // lastFireTime pattern: capture property used as lastFireTime in Date.now() - X < Y * 1000 tests
+    const lastFireTimeId = register('lastFireTime', (node: t.Node) => {
+      let capturedProp: t.Identifier | null = null;
+
+      // helper: is Date.now()
+      function isDateNow(n: t.Node | null | undefined) {
+        if (!n) return false;
+        if (!t.isCallExpression(n)) return false;
+        const callee = n.callee;
+        if (!t.isMemberExpression(callee)) return false;
+        if (callee.computed) return false;
+        if (!t.isIdentifier(callee.object) || callee.object.name !== 'Date') return false;
+        if (!t.isIdentifier(callee.property) || callee.property.name !== 'now') return false;
+        return true;
+      }
+
+      // Walk looking for IfStatement with test like: Date.now() - <member> < <expr> * 1000
+      walk(node, (n) => {
+        if (capturedProp) return;
+
+        if (!t.isIfStatement(n)) return;
+        const test = n.test;
+        if (!t.isBinaryExpression(test) || test.operator !== '<') return;
+
+        // left should be Date.now() - X
+        const left = test.left;
+        if (!t.isBinaryExpression(left) || left.operator !== '-') return;
+        if (!isDateNow(left.left)) return;
+
+        // X should be a MemberExpression that ends with .<lastFireProp>
+        const X = left.right;
+        if (!t.isMemberExpression(X)) return;
+
+        // Accept chain like kP.WwmWwn[kQ].lastFireTime
+        // So X.property is the lastFireTime identifier (non-computed)
+        if (X.computed) return;
+        if (!t.isIdentifier(X.property)) return;
+
+        // Ensure X.object is a MemberExpression that is computed (array access) or a chain containing computed access
+        const maybeArray = X.object;
+        if (!t.isMemberExpression(maybeArray)) return;
+
+        // Right side should be something like kR.wwNMn * 1000 (BinaryExpression with * and numeric 1000)
+        const right = test.right;
+        if (!t.isBinaryExpression(right) || right.operator !== '*') return;
+        // one side must be numeric literal 1000
+        const isThousand = (r: t.Node) => t.isNumericLiteral(r) && r.value === 1000;
+        if (!isThousand(right.left) && !isThousand(right.right)) return;
+
+        // If we reach here, capture the property used as lastFireTime
+        capturedProp = X.property;
+      });
+
+      if (!capturedProp) return false;
+      lastFireTimeId.match(capturedProp as any);
+      return true;
+    });
+
     /* Capture results and emit at Program exit */
     const discovered = new Map<string, string>();
 
