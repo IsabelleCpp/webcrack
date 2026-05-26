@@ -164,20 +164,35 @@ function findSmallestContainer(root: t.Node, start: number, end: number): t.Node
   return container;
 }
 
-/* Generic helper to find a declarator of the form var <id> = this.<...>.<prop> */
-function findDeclaratorChain(root: t.Node) {
-  let innerProp: t.Identifier | null = null;
-  let outerProp: t.Identifier | null = null;
+function findSingleLevelDeclarator(root: t.Node) {
+  let prop: t.Identifier | null = null;
   let declaratorNode: t.Node | null = null;
-
   walk(root, (n) => {
-    if (innerProp && outerProp) return;
+    if (declaratorNode) return;
     if (!t.isVariableDeclarator(n)) return;
     if (!t.isIdentifier(n.id)) return;
     const init = n.init;
     if (!init || !t.isMemberExpression(init)) return;
     if (init.computed) return;
+    if (t.isThisExpression(init.object) && t.isIdentifier(init.property)) {
+      prop = init.property;
+      declaratorNode = n;
+    }
+  });
+  return { prop, declaratorNode };
+}
 
+function findTwoLevelDeclarator(root: t.Node) {
+  let innerProp: t.Identifier | null = null;
+  let outerProp: t.Identifier | null = null;
+  let declaratorNode: t.Node | null = null;
+  walk(root, (n) => {
+    if (declaratorNode) return;
+    if (!t.isVariableDeclarator(n)) return;
+    if (!t.isIdentifier(n.id)) return;
+    const init = n.init;
+    if (!init || !t.isMemberExpression(init)) return;
+    if (init.computed) return;
     const outerME = init;
     const outer = outerME.property;
     const innerME = outerME.object;
@@ -185,17 +200,15 @@ function findDeclaratorChain(root: t.Node) {
     if (innerME.computed) return;
     const innerObj = innerME.object;
     const inner = innerME.property;
-
     if (!t.isThisExpression(innerObj)) return;
     if (!t.isIdentifier(inner) || !t.isIdentifier(outer)) return;
-
     innerProp = inner;
     outerProp = outer;
     declaratorNode = n;
   });
-
   return { innerProp, outerProp, declaratorNode };
 }
+
 
 /* New helper: check for numeric literal 1 (this.tf += 1) */
 function isNumericOne(n: t.Node) {
@@ -557,14 +570,25 @@ export default {
       return matched;
     });
 
-    // playerState, weaponInventory, currentWeaponSlot share a similar pattern:
-    //  - find declarator var <local> = this.<inner>.<outer>;
-    //  - find a this.tf += 1 update after the declarator
-    // We implement a small factory to avoid duplication.
-    function makeTfBasedPattern(name: string, captureWhich: 'inner' | 'outer') {
+    function makeTfBasedPattern(name: string, mode: 'single' | 'inner' | 'outer') {
       const cap = register(name, (node: t.Node) => {
-        const { innerProp, outerProp, declaratorNode } = findDeclaratorChain(node);
-        if (!innerProp || !outerProp || !declaratorNode) return false;
+        let innerProp: t.Identifier | null = null;
+        let outerProp: t.Identifier | null = null;
+        let declaratorNode: t.Node | null = null;
+
+        if (mode === 'single') {
+          const res = findSingleLevelDeclarator(node);
+          innerProp = res.prop;
+          declaratorNode = res.declaratorNode;
+          if (!innerProp || !declaratorNode) return false;
+        } else {
+          const res = findTwoLevelDeclarator(node);
+          innerProp = res.innerProp;
+          outerProp = res.outerProp;
+          declaratorNode = res.declaratorNode;
+          if (!innerProp || !outerProp || !declaratorNode) return false;
+        }
+
         const declStart = getStart(declaratorNode);
         const declEnd = getEnd(declaratorNode);
         if (typeof declStart !== 'number' || typeof declEnd !== 'number') return false;
@@ -573,7 +597,9 @@ export default {
         const matched = findTfUpdateAfter(container, declEnd);
         if (!matched) return false;
 
-        if (captureWhich === 'inner') {
+        if (mode === 'single') {
+          cap.match(innerProp as any);
+        } else if (mode === 'inner') {
           cap.match(innerProp as any);
         } else {
           cap.match(outerProp as any);
@@ -583,10 +609,11 @@ export default {
       return cap;
     }
 
+
     // Register the three similar patterns
-    makeTfBasedPattern('playerState', 'inner'); // original captured candidateProp
-    makeTfBasedPattern('weaponInventory', 'inner'); // inner property
-    makeTfBasedPattern('currentWeaponSlot', 'outer'); // outer property
+    makeTfBasedPattern('playerState', 'single');
+    makeTfBasedPattern('weaponInventory', 'inner');
+    makeTfBasedPattern('currentWeaponSlot', 'outer');
 
     // Replace the previous setAmmoId predicate with this version
     const setAmmoId = register('setAmmo', (node: t.Node) => {
