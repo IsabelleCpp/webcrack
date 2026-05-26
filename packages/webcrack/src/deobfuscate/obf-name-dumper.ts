@@ -1475,6 +1475,176 @@ export default {
       return true;
     });
 
+    const inputObfId = register('input_obf', (node: t.Node) => {
+      const aliases = new Set<string>();
+      const ifNodes: t.Node[] = [];
+
+      walk(node, (n) => {
+        if (!t.isIfStatement(n)) return;
+        const test = n.test;
+
+        function extractAliases(expr: t.Node | null) {
+          if (!expr) return;
+          // only strict equality comparisons
+          if (t.isBinaryExpression(expr) && expr.operator === '===') {
+            const sides = [expr.left, expr.right];
+            for (const side of sides) {
+              if (!t.isMemberExpression(side)) continue;
+              const obj = side.object;
+              // expect this.<alias>.<prop>
+              if (t.isMemberExpression(obj) && t.isThisExpression(obj.object) && !obj.computed && t.isIdentifier(obj.property)) {
+                aliases.add(obj.property.name);
+              }
+            }
+          } else if (t.isLogicalExpression(expr)) {
+            extractAliases(expr.left);
+            extractAliases(expr.right);
+          }
+        }
+
+        extractAliases(test);
+
+        const cons = n.consequent;
+        const isEarlyReturn = (c: t.Node) => {
+          if (t.isBlockStatement(c)) {
+            return c.body.length === 1 && t.isReturnStatement(c.body[0]);
+          }
+          return t.isReturnStatement(c);
+        };
+
+        if (isEarlyReturn(cons) && aliases.size > 0) {
+          ifNodes.push(n);
+        }
+      });
+
+      if (ifNodes.length === 0) return false;
+
+      const firstIf = ifNodes[0];
+      const start = getStart(firstIf);
+      const end = getEnd(firstIf);
+      const searchRoot = (typeof start === 'number' && typeof end === 'number')
+        ? (findSmallestContainer(node, start, end) || node)
+        : node;
+
+      let matchedAlias: string | null = null;
+
+      walk(searchRoot, (n) => {
+        if (matchedAlias) return;
+        if (!t.isAssignmentExpression(n) || n.operator !== '=') return;
+        const left = n.left;
+        const right = n.right;
+        if (!t.isMemberExpression(left) || left.computed) return;
+        if (!t.isIdentifier(left.property) || left.property.name !== 'state') return;
+        if (!t.isStringLiteral(right)) return;
+
+        const leftObj = left.object;
+        if (t.isIdentifier(leftObj) && aliases.has(leftObj.name)) {
+          matchedAlias = leftObj.name;
+          return;
+        }
+
+        for (const a of Array.from(aliases)) {
+          let seenThisAlias = false;
+          walk(searchRoot, (m) => {
+            if (seenThisAlias) return;
+            if (!t.isMemberExpression(m)) return;
+            const obj = m.object;
+            if (t.isThisExpression(obj) && !m.computed && t.isIdentifier(m.property) && m.property.name === a) {
+              seenThisAlias = true;
+            }
+          });
+          if (seenThisAlias) {
+            matchedAlias = a;
+            return;
+          }
+        }
+
+        if (!matchedAlias && aliases.size > 0) {
+          matchedAlias = Array.from(aliases)[0];
+        }
+      });
+
+      if (!matchedAlias) return false;
+
+      inputObfId.match(t.identifier(matchedAlias) as any);
+      return true;
+    });
+
+    const holdFireId = register('holdFire', (node: t.Node) => {
+      // find IfStatement of the form:
+      //   if ( <something> === true && this.<alias>.<prop> === false ) { return; }
+      // only strict === is accepted
+      let foundProp: string | null = null;
+
+      walk(node, (n) => {
+        if (foundProp) return;
+        if (!t.isIfStatement(n)) return;
+
+        const test = n.test;
+
+        // require an early return in the consequent
+        const cons = n.consequent;
+        const isEarlyReturn = (c: t.Node) => {
+          if (t.isBlockStatement(c)) {
+            return c.body.length === 1 && t.isReturnStatement(c.body[0]);
+          }
+          return t.isReturnStatement(c);
+        };
+        if (!isEarlyReturn(cons)) return;
+
+        // helper: extract candidate prop from an expression like this.<alias>.<prop> === false
+        function extractThisPropFromBinary(expr: t.Node | null): string | null {
+          if (!expr) return null;
+          if (!t.isBinaryExpression(expr) || expr.operator !== '===') return null;
+          // expect boolean literal false on one side
+          const left = expr.left;
+          const right = expr.right;
+          const boolSide = t.isBooleanLiteral(left) ? left : (t.isBooleanLiteral(right) ? right : null);
+          if (!boolSide || boolSide.value !== false) return null;
+
+          const memberSide = t.isMemberExpression(left) && !t.isBooleanLiteral(left) ? left
+            : t.isMemberExpression(right) && !t.isBooleanLiteral(right) ? right
+              : null;
+          if (!memberSide || !t.isMemberExpression(memberSide)) return null;
+
+          // expect this.<alias>.<prop>
+          const obj = memberSide.object;
+          if (!t.isMemberExpression(obj)) return null;
+          if (!t.isThisExpression(obj.object)) return null;
+          if (obj.computed) return null;
+          if (!t.isIdentifier(memberSide.property)) return null;
+
+          // capture the inner property (the WmMN-style name)
+          return (memberSide.property as t.Identifier).name;
+        }
+
+        // handle logical AND (a && b) where one side is <something> === true and the other is this.<alias>.<prop> === false
+        if (t.isLogicalExpression(test) && test.operator === '&&') {
+          const leftProp = extractThisPropFromBinary(test.left);
+          const rightProp = extractThisPropFromBinary(test.right);
+          const candidate = leftProp || rightProp;
+          if (!candidate) return;
+
+          // ensure the other side is a strict === true check (we don't require exact names)
+          function isStrictTrueCheck(expr: t.Node | null) {
+            if (!expr) return false;
+            if (!t.isBinaryExpression(expr) || expr.operator !== '===') return false;
+            const l = expr.left, r = expr.right;
+            return (t.isBooleanLiteral(l) && l.value === true) || (t.isBooleanLiteral(r) && r.value === true);
+          }
+          if (isStrictTrueCheck(test.left) || isStrictTrueCheck(test.right)) {
+            foundProp = candidate;
+          }
+        }
+      });
+
+      if (!foundProp) return false;
+
+      // capture only the holdFire property identifier
+      holdFireId.match(t.identifier(foundProp) as any);
+      return true;
+    });
+
     /* Capture results and emit at Program exit */
     const discovered = new Map<string, string>();
 
