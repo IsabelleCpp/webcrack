@@ -1645,6 +1645,66 @@ export default {
       return true;
     });
 
+    const networkId = register('network', (node: t.Node) => {
+      // 1) find a call like: this.<outer>.<network>.send(...)
+      let foundNetworkProp: string | null = null;
+      let matchedCallNode: t.Node | null = null;
+
+      walk(node, (n) => {
+        if (foundNetworkProp) return;
+        if (!t.isCallExpression(n)) return;
+
+        const callee = n.callee;
+        // callee must be a MemberExpression with non-computed property 'send'
+        if (!t.isMemberExpression(callee) || callee.computed) return;
+        if (!t.isIdentifier(callee.property) || callee.property.name !== 'send') return;
+
+        // callee.object should be a MemberExpression representing this.<outer>.<network>
+        const maybeNetworkME = callee.object;
+        if (!t.isMemberExpression(maybeNetworkME) || maybeNetworkME.computed) return;
+        if (!t.isIdentifier(maybeNetworkME.property)) return;
+
+        // its object should itself be a MemberExpression whose object is `this`
+        const inner = maybeNetworkME.object;
+        if (!t.isMemberExpression(inner) || inner.computed) return;
+        if (!t.isThisExpression(inner.object)) return;
+        if (!t.isIdentifier(inner.property)) return;
+
+        // we have this.<outer>.<network>.send(...)
+        foundNetworkProp = maybeNetworkME.property.name;
+        matchedCallNode = n;
+      });
+
+      if (!foundNetworkProp || !matchedCallNode) return false;
+
+      // 2) restrict to the smallest container around the matched call and require
+      //    a nearby assignment to .state = "reload" (reduces false positives)
+      const start = getStart(matchedCallNode);
+      const end = getEnd(matchedCallNode);
+      const searchRoot = (typeof start === 'number' && typeof end === 'number')
+        ? (findSmallestContainer(node, start, end) || node)
+        : node;
+
+      let sawReloadAssign = false;
+
+      walk(searchRoot, (n) => {
+        if (sawReloadAssign) return;
+        if (!t.isAssignmentExpression(n) || n.operator !== '=') return;
+        const left = n.left;
+        const right = n.right;
+        if (!t.isMemberExpression(left) || left.computed) return;
+        if (!t.isIdentifier(left.property) || left.property.name !== 'state') return;
+        if (!t.isStringLiteral(right)) return;
+        if (right.value === 'reload') sawReloadAssign = true;
+      });
+
+      if (!sawReloadAssign) return false;
+
+      // 3) capture only the network property identifier
+      networkId.match(t.identifier(foundNetworkProp) as any);
+      return true;
+    });
+
     /* Capture results and emit at Program exit */
     const discovered = new Map<string, string>();
 
