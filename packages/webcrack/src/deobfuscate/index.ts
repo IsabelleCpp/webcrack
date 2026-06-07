@@ -11,6 +11,7 @@ import controlFlowObject from './control-flow-object';
 import controlFlowSwitch from './control-flow-switch';
 import deadCode from './dead-code';
 import { findDecoders } from './decoder';
+import { findEncryptedStringMap } from './hex-xor-keyed-map-finder';
 import inlineDecodedStrings from './inline-decoded-strings';
 import inlineDecoderWrappers from './inline-decoder-wrappers';
 import inlineObjectProps from './inline-object-props';
@@ -75,5 +76,19 @@ export default {
       [mergeStrings, deadCode, controlFlowObject, controlFlowSwitch],
       { noScope: true },
     ).changes;
+
+    // ---------------------------------------------------------------------
+    // Encrypted keyed hex->XOR map detection (placeholder)
+    // ---------------------------------------------------------------------
+    // Detect the keyed hex->XOR map and decoder. For now we only log the
+    // detection result and bail out if none is found. The rest of the
+    // transformation pipeline for this map will be implemented later.
+    const encryptedMap = findEncryptedStringMap(ast);
+    logger(
+      encryptedMap
+        ? `Encrypted Map: ${encryptedMap.mapName}, decoder ${encryptedMap.originalName || encryptedMap.name}`
+        : 'Encrypted Map: no',
+    );
+    if (!encryptedMap) return;
   },
 } satisfies AsyncTransform<Sandbox>;
