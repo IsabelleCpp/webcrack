@@ -111,7 +111,8 @@ export default {
       encryptedMap.path.remove();
       encryptedMap.mapPath?.remove();
       encryptedMap.cachePath?.remove();
-      state.changes += 3;
+      encryptedMap.decoderGlobalPath?.remove();
+      state.changes += 4;
     }
   },
 } satisfies AsyncTransform<Sandbox>;

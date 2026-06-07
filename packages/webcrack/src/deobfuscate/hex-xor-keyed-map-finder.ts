@@ -21,6 +21,8 @@ export interface EncryptedStringMap {
     cacheName: string | null;
     /** path to the cache declaration (VariableDeclaration NodePath) */
     cachePath: NodePath<t.VariableDeclaration> | null;
+    /** path to the global decoder VariableDeclaration inserted at program top (if any) */
+    decoderGlobalPath: NodePath<t.VariableDeclaration> | null;
 }
 
 /**
@@ -298,21 +300,41 @@ export function findEncryptedStringMap(
         return flags;
     }
 
-    function ensureGlobalBindingAtProgramTop(decoderIdName: string, anyDeclPath: NodePath<t.VariableDeclaration>) {
+    function ensureGlobalBindingAtProgramTop(
+        decoderIdName: string,
+        anyDeclPath: NodePath<t.VariableDeclaration>,
+    ): NodePath<t.VariableDeclaration> | null {
         try {
-            if (insertedGlobalBindings.has(decoderIdName)) return;
+            if (insertedGlobalBindings.has(decoderIdName)) {
+                // try to find and return existing declaration path
+                const programPath = anyDeclPath.scope.getProgramParent().path;
+                if (programPath && Array.isArray((programPath.node as any).body)) {
+                    const bodyPaths = programPath.get('body') as NodePath<t.Statement>[];
+                    for (const p of bodyPaths) {
+                        if (p.isVariableDeclaration()) {
+                            for (const d of p.node.declarations) {
+                                if (t.isIdentifier(d.id) && d.id.name === decoderIdName) return p as NodePath<t.VariableDeclaration>;
+                            }
+                        }
+                    }
+                }
+                return null;
+            }
 
             const programPath = anyDeclPath.scope.getProgramParent().path;
-            if (!programPath || !programPath.node || !Array.isArray((programPath.node as any).body)) return;
+            if (!programPath || !programPath.node || !Array.isArray((programPath.node as any).body)) return null;
 
             const body = (programPath.node as any).body as t.Statement[];
-            for (const stmt of body) {
-                if (!t.isVariableDeclaration(stmt)) continue;
-                for (const d of stmt.declarations) {
-                    if (t.isIdentifier(d.id) && d.id.name === decoderIdName) {
-                        insertedGlobalBindings.add(decoderIdName);
-                        if (programPath && typeof (programPath as any).scope?.crawl === 'function') (programPath as any).scope.crawl();
-                        return;
+            // if already declared, return its path
+            const bodyPaths = programPath.get('body') as NodePath<t.Statement>[];
+            for (const p of bodyPaths) {
+                if (p.isVariableDeclaration()) {
+                    for (const d of p.node.declarations) {
+                        if (t.isIdentifier(d.id) && d.id.name === decoderIdName) {
+                            insertedGlobalBindings.add(decoderIdName);
+                            if (programPath && typeof (programPath as any).scope?.crawl === 'function') (programPath as any).scope.crawl();
+                            return p as NodePath<t.VariableDeclaration>;
+                        }
                     }
                 }
             }
@@ -347,11 +369,26 @@ export function findEncryptedStringMap(
                 anyDeclPath.scope.crawl();
             }
 
+            // find and return the inserted VariableDeclaration NodePath
+            const newBodyPaths = programPath.get('body') as NodePath<t.Statement>[];
+            for (const p of newBodyPaths) {
+                if (p.isVariableDeclaration()) {
+                    for (const d of p.node.declarations) {
+                        if (t.isIdentifier(d.id) && d.id.name === decoderIdName) {
+                            insertedGlobalBindings.add(decoderIdName);
+                            logger.log('inserted global var %s = null; at program top (index=%d) and crawled scopes', decoderIdName, insertIndex);
+                            return p as NodePath<t.VariableDeclaration>;
+                        }
+                    }
+                }
+            }
+
             insertedGlobalBindings.add(decoderIdName);
             logger.log('inserted global var %s = null; at program top (index=%d) and crawled scopes', decoderIdName, insertIndex);
         } catch (e) {
             logger.log('failed to insert global var %s = null;: %s', decoderIdName, (e as Error).message);
         }
+        return null;
     }
 
     /* ---------- collect map candidates ---------- */
@@ -394,6 +431,7 @@ export function findEncryptedStringMap(
         let cacheDeclPath: NodePath<t.VariableDeclaration> | null = null;
         let decoderPath: NodePath<any> | null = null;
         let decoderIdName: string | null = null;
+        let decoderGlobalDeclPath: NodePath<t.VariableDeclaration> | null = null;
 
         // detect immediate cache declaration (empty object) after map
         try {
@@ -488,9 +526,19 @@ export function findEncryptedStringMap(
                     try {
                         let binding = path.scope.getBinding(decoderIdName);
                         if (!binding) {
-                            ensureGlobalBindingAtProgramTop(decoderIdName, candidate.declPath);
+                            // ensure global var and capture its declaration path
+                            decoderGlobalDeclPath = ensureGlobalBindingAtProgramTop(decoderIdName, candidate.declPath);
                             const programScope = candidate.declPath.scope.getProgramParent();
                             binding = programScope.getBinding(decoderIdName) || candidate.declPath.scope.getBinding(decoderIdName);
+                        } else {
+                            // if binding exists, try to get its VariableDeclaration parent path
+                            try {
+                                if (binding.path && binding.path.parentPath && binding.path.parentPath.isVariableDeclaration()) {
+                                    decoderGlobalDeclPath = binding.path.parentPath as NodePath<t.VariableDeclaration>;
+                                }
+                            } catch {
+                                // ignore
+                            }
                         }
 
                         if (binding) {
@@ -586,10 +634,30 @@ export function findEncryptedStringMap(
                     );
 
                     try {
-                        const binding = path.scope.getBinding(decoderIdName);
+                        let binding = path.scope.getBinding(decoderIdName);
+                        if (!binding) {
+                            // ensure global var and capture its declaration path
+                            decoderGlobalDeclPath = ensureGlobalBindingAtProgramTop(decoderIdName, candidate.declPath);
+                            const programScope = candidate.declPath.scope.getProgramParent();
+                            binding = programScope.getBinding(decoderIdName) || candidate.declPath.scope.getBinding(decoderIdName);
+                        } else {
+                            // if binding exists, try to get its VariableDeclaration parent path
+                            try {
+                                if (binding.path && binding.path.parentPath && binding.path.parentPath.isVariableDeclaration()) {
+                                    decoderGlobalDeclPath = binding.path.parentPath as NodePath<t.VariableDeclaration>;
+                                }
+                            } catch {
+                                // ignore
+                            }
+                        }
+
                         if (binding) {
-                            renameFast(binding, '__ENCRYPTED_STRING_MAP_DECODER__');
-                            logger.log('renamed decoder binding %s -> __ENCRYPTED_STRING_MAP_DECODER__', decoderIdName);
+                            try {
+                                renameFast(binding, '__ENCRYPTED_STRING_MAP_DECODER__');
+                                logger.log('renamed decoder binding %s -> __ENCRYPTED_STRING_MAP_DECODER__', decoderIdName);
+                            } catch (e) {
+                                logger.log('failed to rename binding %s: %s', decoderIdName, (e as Error).message);
+                            }
                         }
                     } catch (e) {
                         logger.log('failed to rename binding %s: %s', decoderIdName, (e as Error).message);
@@ -683,22 +751,31 @@ export function findEncryptedStringMap(
             }
         }
 
-        // collect decoder references if available
-        if (decoderIdName) {
-            try {
-                let binding = candidate.declPath.scope.getBinding(decoderIdName);
-                if (!binding) {
-                    const programScope = candidate.declPath.scope.getProgramParent();
-                    binding = programScope.getBinding(decoderIdName);
+        // attempt to collect references for decoder binding
+        try {
+            if (decoderPath) {
+                const idName = decoderIdName || '';
+                const programScope = candidate.declPath.scope.getProgramParent();
+
+                // Use a safe, type-checked access for decoderPath.scope to avoid TS 'never' error.
+                // Cast decoderPath to NodePath<any> and use optional chaining.
+                const decoderPathAsAny = decoderPath as NodePath<any> | null;
+
+                const binding =
+                    programScope.getBinding(idName) ||
+                    candidate.declPath.scope.getBinding(idName) ||
+                    decoderPathAsAny?.scope?.getBinding(idName);
+
+                if (binding) {
+                    references = binding.referencePaths || null;
                 }
-                if (binding) references = binding.referencePaths;
-            } catch {
-                // ignore
             }
+        } catch (e) {
+            logger.log('error collecting references for decoder %s: %s', String(decoderIdName), (e as Error).message);
         }
 
         result = {
-            path: decoderPath,
+            path: decoderPath as NodePath<t.Node>,
             references,
             name: '__ENCRYPTED_STRING_MAP_DECODER__',
             originalName: decoderIdName || '',
@@ -706,15 +783,15 @@ export function findEncryptedStringMap(
             mapPath: mapDeclPath,
             cacheName: foundCacheName,
             cachePath,
+            decoderGlobalPath: decoderGlobalDeclPath,
         };
 
-        logger.log('match success: map=%s decoder=%s cache=%s', result.mapName, result.originalName || result.name, result.cacheName);
-
+        // stop after first successful candidate
         break;
     }
 
     if (!result) {
-        logger.log('end: no encrypted keyed hex->xor map found');
+        logger.log('no encrypted string map found after trying candidates');
     }
 
     return result;
