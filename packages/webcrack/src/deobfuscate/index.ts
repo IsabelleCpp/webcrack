@@ -11,13 +11,14 @@ import controlFlowObject from './control-flow-object';
 import controlFlowSwitch from './control-flow-switch';
 import deadCode from './dead-code';
 import { findDecoders } from './decoder';
+import { getDecoderForMap } from './get-map-decoder';
 import { findEncryptedStringMap } from './hex-xor-keyed-map-finder';
 import inlineDecodedStrings from './inline-decoded-strings';
 import inlineDecoderWrappers from './inline-decoder-wrappers';
 import inlineObjectProps from './inline-object-props';
 import { findStringArray } from './string-array';
 import type { Sandbox } from './vm';
-import { VMDecoder, createBrowserSandbox, createNodeSandbox } from './vm';
+import { VMDecoder, VMMapEvaluator, createBrowserSandbox, createNodeSandbox } from './vm';
 
 export { createBrowserSandbox, createNodeSandbox, type Sandbox };
 
@@ -77,12 +78,6 @@ export default {
       { noScope: true },
     ).changes;
 
-    // ---------------------------------------------------------------------
-    // Encrypted keyed hex->XOR map detection (placeholder)
-    // ---------------------------------------------------------------------
-    // Detect the keyed hex->XOR map and decoder. For now we only log the
-    // detection result and bail out if none is found. The rest of the
-    // transformation pipeline for this map will be implemented later.
     const encryptedMap = findEncryptedStringMap(ast);
     logger(
       encryptedMap
@@ -90,5 +85,33 @@ export default {
         : 'Encrypted Map: no',
     );
     if (!encryptedMap) return;
+    const mapDecoder = getDecoderForMap(encryptedMap);
+    const mapDecoders = [mapDecoder];
+
+    logger(
+      `Encrypted Map Decoders: ${mapDecoders
+        .map((d) => d.originalName)
+        .join(', ')}`,
+    );
+
+    for (const currentMapDecoder of mapDecoders) {
+      state.changes += applyTransform(
+        ast,
+        inlineDecoderWrappers,
+        currentMapDecoder.path,
+      ).changes;
+    }
+
+    const vmMap = new VMMapEvaluator(sandbox, mapDecoders, encryptedMap);
+    state.changes += (
+      await applyTransformAsync(ast, inlineDecodedStrings, { vm: vmMap })
+    ).changes;
+
+    if (mapDecoders.length > 0) {
+      encryptedMap.path.remove();
+      encryptedMap.mapPath?.remove();
+      encryptedMap.cachePath?.remove();
+      state.changes += 3;
+    }
   },
 } satisfies AsyncTransform<Sandbox>;
