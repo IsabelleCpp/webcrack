@@ -1726,6 +1726,177 @@ export default {
       }
     }
 
+    function applyRenames(root: t.Node, map: Map<string, string>) {
+      if (map.size === 0) return;
+
+      const obfTokens = Array.from(map.keys());
+      const obfToReadable = (s: string) => {
+        let out = s;
+        for (const obf of obfTokens) {
+          const readable = map.get(obf)!;
+          if (out.includes(obf)) out = out.replaceAll(obf, readable);
+        }
+        return out;
+      };
+
+      function renameIdentifier(id: t.Identifier | null | undefined) {
+        if (!id) return;
+        const newName = map.get(id.name);
+        if (newName) id.name = newName;
+      }
+
+      walk(root, (n) => {
+        // --- Existing identifier/member/function/objectproperty handling (keep as before) ---
+        if (t.isIdentifier(n)) {
+          renameIdentifier(n);
+          return;
+        }
+
+        if (t.isMemberExpression(n)) {
+          if (!n.computed && t.isIdentifier(n.property)) renameIdentifier(n.property);
+          if (t.isIdentifier(n.object)) renameIdentifier(n.object);
+          if (n.computed && t.isStringLiteral(n.property)) {
+            const replaced = obfToReadable(n.property.value);
+            if (replaced !== n.property.value) n.property = t.stringLiteral(replaced);
+          }
+          return;
+        }
+
+        if (t.isVariableDeclarator(n)) {
+          if (t.isIdentifier(n.id)) renameIdentifier(n.id);
+          return;
+        }
+
+        if (t.isFunctionExpression(n) || t.isArrowFunctionExpression(n) || t.isFunctionDeclaration(n)) {
+          for (const p of n.params) if (t.isIdentifier(p)) renameIdentifier(p);
+          return;
+        }
+
+        if (t.isObjectProperty(n)) {
+          if (!n.computed && t.isIdentifier(n.key)) {
+            renameIdentifier(n.key);
+          } else if (!n.computed && t.isStringLiteral(n.key)) {
+            const replaced = obfToReadable(n.key.value);
+            if (replaced !== n.key.value) n.key = t.stringLiteral(replaced);
+          } else if (n.computed && t.isStringLiteral(n.key)) {
+            const replaced = obfToReadable(n.key.value);
+            if (replaced !== n.key.value) n.key = t.stringLiteral(replaced);
+          }
+          return;
+        }
+
+        if ((n as any).type === 'ClassMethod' || (n as any).type === 'ObjectMethod') {
+          const key = (n as any).key as t.Node | undefined;
+          const computed = !!(n as any).computed;
+          if (key && !computed && t.isIdentifier(key)) renameIdentifier(key);
+          return;
+        }
+
+        if ((n as any).type === 'JSXIdentifier') {
+          const name = (n as any).name as string | undefined;
+          if (name && map.has(name)) (n as any).name = map.get(name);
+          return;
+        }
+
+        if (t.isStringLiteral(n)) {
+          const replaced = obfToReadable(n.value);
+          if (replaced !== n.value) (n as t.StringLiteral).value = replaced;
+          return;
+        }
+
+        if (t.isTemplateLiteral(n)) {
+          let changed = false;
+          const newQuasis = n.quasis.map((q) => {
+            const raw = q.value.raw;
+            const replaced = obfToReadable(raw);
+            if (replaced !== raw) changed = true;
+            return t.templateElement({ raw: replaced, cooked: replaced }, q.tail);
+          });
+          if (changed) (n.quasis as any) = newQuasis;
+          return;
+        }
+
+        if (t.isCallExpression(n)) {
+          for (let i = 0; i < n.arguments.length; i++) {
+            const arg = n.arguments[i];
+            if (t.isStringLiteral(arg)) {
+              const replaced = obfToReadable(arg.value);
+              if (replaced !== arg.value) n.arguments[i] = t.stringLiteral(replaced);
+            } else if (t.isTemplateLiteral(arg)) {
+              let changed = false;
+              const newQuasis = arg.quasis.map((q) => {
+                const raw = q.value.raw;
+                const replaced = obfToReadable(raw);
+                if (replaced !== raw) changed = true;
+                return t.templateElement({ raw: replaced, cooked: replaced }, q.tail);
+              });
+              if (changed) n.arguments[i] = t.templateLiteral(newQuasis, arg.expressions);
+            }
+          }
+          return;
+        }
+
+        if (t.isBinaryExpression(n) && n.operator === '+') {
+          if (t.isStringLiteral(n.left)) {
+            const replaced = obfToReadable(n.left.value);
+            if (replaced !== n.left.value) (n.left as t.StringLiteral) = t.stringLiteral(replaced);
+          } else if (t.isTemplateLiteral(n.left)) {
+            let changed = false;
+            const newQuasis = n.left.quasis.map((q) => {
+              const raw = q.value.raw;
+              const replaced = obfToReadable(raw);
+              if (replaced !== raw) changed = true;
+              return t.templateElement({ raw: replaced, cooked: replaced }, q.tail);
+            });
+            if (changed) (n.left as t.TemplateLiteral) = t.templateLiteral(newQuasis, n.left.expressions);
+          }
+
+          if (t.isStringLiteral(n.right)) {
+            const replaced = obfToReadable(n.right.value);
+            if (replaced !== n.right.value) (n.right as t.StringLiteral) = t.stringLiteral(replaced);
+          } else if (t.isTemplateLiteral(n.right)) {
+            let changed = false;
+            const newQuasis = n.right.quasis.map((q) => {
+              const raw = q.value.raw;
+              const replaced = obfToReadable(raw);
+              if (replaced !== raw) changed = true;
+              return t.templateElement({ raw: replaced, cooked: replaced }, q.tail);
+            });
+            if (changed) (n.right as t.TemplateLiteral) = t.templateLiteral(newQuasis, n.right.expressions);
+          }
+          return;
+        }
+
+        // --- NEW: explicit ObjectExpression handling ---
+        if (t.isObjectExpression(n)) {
+          for (const prop of n.properties) {
+            if (!prop) continue;
+            // Only handle ObjectProperty (skip SpreadElement, etc.)
+            if (t.isObjectProperty(prop)) {
+              // identifier key: { WwwMNnmW: {...} }
+              if (!prop.computed && t.isIdentifier(prop.key)) {
+                renameIdentifier(prop.key);
+              }
+              // string key: { "WwwMNnmW": {...} }
+              else if (!prop.computed && t.isStringLiteral(prop.key)) {
+                const replaced = obfToReadable(prop.key.value);
+                if (replaced !== prop.key.value) prop.key = t.stringLiteral(replaced);
+              }
+              // computed but literal: { ["WwwMNnmW"]: ... }
+              else if (prop.computed && t.isStringLiteral(prop.key)) {
+                const replaced = obfToReadable(prop.key.value);
+                if (replaced !== prop.key.value) prop.key = t.stringLiteral(replaced);
+              }
+            }
+          }
+          // continue walking into property values (walk will do that)
+          return;
+        }
+
+        // fallback: other nodes are handled by earlier cases or by walk's fallback traversal
+      });
+    }
+
     return {
       AssignmentExpression(path) {
         tryCapture(path.node);
@@ -1752,6 +1923,18 @@ export default {
             props.push(t.objectProperty(t.identifier(readable), t.stringLiteral(obf)));
             resultObj[readable] = obf;
           }
+
+          const obfToReadable = new Map<string, string>();
+          for (const [readable, obf] of discovered) {
+            obfToReadable.set(obf, readable);
+          }
+
+          try {
+            applyRenames(path.node, obfToReadable);
+          } catch (err) {
+            logger('error', { message: 'error while applying renames', error: err });
+          }
+
           const decl = t.variableDeclaration('const', [
             t.variableDeclarator(t.identifier('__obf_names'), t.objectExpression(props)),
           ]);
