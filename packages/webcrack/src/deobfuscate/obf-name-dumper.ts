@@ -1730,11 +1730,19 @@ export default {
       if (map.size === 0) return;
 
       const obfTokens = Array.from(map.keys());
+
+      const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+      // Matches only whole identifier-like words (not substrings of other identifiers).
+      // Uses (^|[^idChar]) capture to preserve a non-identifier prefix if present.
+      const idChar = 'A-Za-z0-9_$';
       const obfToReadable = (s: string) => {
         let out = s;
         for (const obf of obfTokens) {
           const readable = map.get(obf)!;
-          if (out.includes(obf)) out = out.replaceAll(obf, readable);
+          if (!out.includes(obf)) continue;
+          const re = new RegExp(`(^|[^${idChar}])(${escapeRegExp(obf)})(?=[^${idChar}]|$)`, 'g');
+          out = out.replace(re, (_match, prefix, _token) => `${prefix}${readable}`);
         }
         return out;
       };
@@ -1746,7 +1754,6 @@ export default {
       }
 
       walk(root, (n) => {
-        // --- Existing identifier/member/function/objectproperty handling (keep as before) ---
         if (t.isIdentifier(n)) {
           renameIdentifier(n);
           return;
@@ -1867,35 +1874,28 @@ export default {
           return;
         }
 
-        // --- NEW: explicit ObjectExpression handling ---
         if (t.isObjectExpression(n)) {
           for (const prop of n.properties) {
             if (!prop) continue;
-            // Only handle ObjectProperty (skip SpreadElement, etc.)
             if (t.isObjectProperty(prop)) {
-              // identifier key: { WwwMNnmW: {...} }
               if (!prop.computed && t.isIdentifier(prop.key)) {
                 renameIdentifier(prop.key);
-              }
-              // string key: { "WwwMNnmW": {...} }
-              else if (!prop.computed && t.isStringLiteral(prop.key)) {
+              } else if (!prop.computed && t.isStringLiteral(prop.key)) {
                 const replaced = obfToReadable(prop.key.value);
                 if (replaced !== prop.key.value) prop.key = t.stringLiteral(replaced);
-              }
-              // computed but literal: { ["WwwMNnmW"]: ... }
-              else if (prop.computed && t.isStringLiteral(prop.key)) {
+              } else if (prop.computed && t.isStringLiteral(prop.key)) {
                 const replaced = obfToReadable(prop.key.value);
                 if (replaced !== prop.key.value) prop.key = t.stringLiteral(replaced);
               }
             }
           }
-          // continue walking into property values (walk will do that)
           return;
         }
 
         // fallback: other nodes are handled by earlier cases or by walk's fallback traversal
       });
     }
+
 
     return {
       AssignmentExpression(path) {
