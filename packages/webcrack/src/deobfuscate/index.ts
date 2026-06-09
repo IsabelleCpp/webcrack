@@ -13,13 +13,14 @@ import deadCode from './dead-code';
 import { findDecoders } from './decoder';
 import { findXorHexDecoder } from './findXorHexDecoder';
 import { getDecoderForMap } from './get-map-decoder';
+import { getDecoderForXor } from './get-xor-decoder';
 import { findEncryptedStringMap } from './hex-xor-keyed-map-finder';
 import inlineDecodedStrings from './inline-decoded-strings';
 import inlineDecoderWrappers from './inline-decoder-wrappers';
 import inlineObjectProps from './inline-object-props';
 import { findStringArray } from './string-array';
 import type { Sandbox } from './vm';
-import { VMDecoder, VMMapEvaluator, createBrowserSandbox, createNodeSandbox } from './vm';
+import { VMDecoder, VMMapEvaluator, VMXorEvaluator, createBrowserSandbox, createNodeSandbox } from './vm';
 
 export { createBrowserSandbox, createNodeSandbox, type Sandbox };
 
@@ -115,12 +116,43 @@ export default {
       encryptedMap.decoderGlobalPath?.remove();
       state.changes += 4;
     }
-    const xorHexDecoder = findXorHexDecoder(ast);
+    const xorInfo = findXorHexDecoder(ast);
     logger(
-      xorHexDecoder
-        ? `xorHexDecoder: ${xorHexDecoder.originalName} renamed to ${xorHexDecoder.name}`
+      xorInfo
+        ? `xorHexDecoder: ${xorInfo.originalName} renamed to ${xorInfo.name}`
         : 'xorHexDecoder: no',
     );
-    if (!xorHexDecoder) return;
+    if (!xorInfo) return;
+    const xorDecoder = getDecoderForXor(xorInfo);
+    const xorDecoders = [xorDecoder];
+
+    logger(
+      `XOR Decoders: ${xorDecoders
+        .map((d) => d.originalName)
+        .join(', ')}`,
+    );
+
+    for (const currentXorDecoder of xorDecoders) {
+      state.changes += applyTransform(
+        ast,
+        inlineDecoderWrappers,
+        currentXorDecoder.path,
+      ).changes;
+    }
+
+    const vmXor = new VMXorEvaluator(sandbox, xorDecoders);
+    state.changes += (
+      await applyTransformAsync(ast, inlineDecodedStrings, { vm: vmXor })
+    ).changes;
+
+    if (xorDecoders.length > 0) {
+      for (const d of xorDecoders) {
+        try {
+          d.path.remove();
+          state.changes += 1;
+        } catch {
+        }
+      }
+    }
   },
 } satisfies AsyncTransform<Sandbox>;

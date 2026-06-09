@@ -1,6 +1,6 @@
 import * as t from '@babel/types';
 import type { AsyncTransform } from '../ast-utils';
-import type { VMDecoder, VMMapEvaluator } from './vm';
+import type { VMDecoder, VMMapEvaluator, VMXorEvaluator } from './vm';
 
 /**
  * Replaces calls to decoder functions with the decoded string.
@@ -29,4 +29,4 @@ export default {
 
     state.changes += calls.length;
   },
-} satisfies AsyncTransform<{ vm: VMDecoder | VMMapEvaluator }>;
+} satisfies AsyncTransform<{ vm: VMDecoder | VMMapEvaluator | VMXorEvaluator }>;

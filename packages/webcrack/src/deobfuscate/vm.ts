@@ -5,6 +5,7 @@ import { generate } from '../ast-utils';
 import type { ArrayRotator } from './array-rotator';
 import type { Decoder } from './decoder';
 import type { MapBasedDecoder } from './get-map-decoder';
+import type { XorDecoderObject } from './get-xor-decoder';
 import type { EncryptedStringMap } from './hex-xor-keyed-map-finder';
 import type { StringArray } from './string-array';
 
@@ -136,9 +137,76 @@ export class VMMapEvaluator {
     const callSources = calls.map((c) => generate(c.node, generateOptions));
 
     const code = `(() => {
-${this.setupCode ? `  ${this.setupCode}\n` : ''}
-  return [${callSources.join(',')}];
-})()`;
+      ${this.setupCode ? `  ${this.setupCode}\n` : ''}
+        return [${callSources.join(',')}];
+    })()`;
+
+    try {
+      const result = await this.sandbox(code);
+      return (result as unknown[]) || [];
+    } catch (error) {
+      debug('webcrack:deobfuscate')('vm code:', code);
+      if (
+        error instanceof Error &&
+        (error.message.includes('undefined symbol') || error.message.includes('Segmentation fault'))
+      ) {
+        throw new Error(
+          'isolated-vm version mismatch. Check https://webcrack.netlify.app/docs/guide/common-errors.html#isolated-vm',
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+  }
+}
+
+export class VMXorEvaluator {
+  decoders: XorDecoderObject[];
+  private setupCode: string;
+  private sandbox: Sandbox;
+
+  constructor(sandbox: Sandbox, decoders: XorDecoderObject[]) {
+    this.sandbox = sandbox;
+    this.decoders = decoders;
+
+    const generateOptions = {
+      compact: true,
+      shouldPrintComment: () => false,
+    };
+
+    const decoderCode = decoders
+      .map((d) => {
+        try {
+          return generate(d.path.node, generateOptions);
+        } catch {
+          return '';
+        }
+      })
+      .filter(Boolean)
+      .join(';\n');
+
+    this.setupCode = [decoderCode].join(';\n');
+  }
+
+  /**
+   * Evaluate the provided call expressions inside the sandbox and return results.
+   *
+   * `calls` should be NodePath<CallExpression>[] pointing at the call expressions
+   * you want to evaluate. The method will generate source for each call expression
+   * and evaluate them as an array expression inside the sandbox.
+   */
+  async decode(calls: NodePath<CallExpression>[]): Promise<unknown[]> {
+    const generateOptions = {
+      compact: true,
+      shouldPrintComment: () => false,
+    };
+
+    const callSources = calls.map((c) => generate(c.node, generateOptions));
+
+    const code = `(() => {
+      ${this.setupCode ? `  ${this.setupCode}\n` : ''}
+        return [${callSources.join(',')}];
+    })()`;
 
     try {
       const result = await this.sandbox(code);
