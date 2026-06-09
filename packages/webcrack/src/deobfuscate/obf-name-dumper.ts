@@ -688,7 +688,8 @@ export default {
         const parts = first.value.split('/');
         if (parts.length < 2) return;
         const second = parts[1];
-        if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(second)) {
+        const IDENT_RE = /^[$_\p{ID_Start}][$_\p{ID_Continue}]*$/u;
+        if (IDENT_RE.test(second)) {
           foundCommitSecond = second;
         }
       });
@@ -1733,15 +1734,13 @@ export default {
 
       const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-      // Matches only whole identifier-like words (not substrings of other identifiers).
-      // Uses (^|[^idChar]) capture to preserve a non-identifier prefix if present.
-      const idChar = 'A-Za-z0-9_$';
+      const idContinueClass = '\\p{ID_Continue}_$';
       const obfToReadable = (s: string) => {
         let out = s;
         for (const obf of obfTokens) {
           const readable = map.get(obf)!;
           if (!out.includes(obf)) continue;
-          const re = new RegExp(`(^|[^${idChar}])(${escapeRegExp(obf)})(?=[^${idChar}]|$)`, 'g');
+          const re = new RegExp(`(^|[^${idContinueClass}])(${escapeRegExp(obf)})(?=[^${idContinueClass}]|$)`, 'gu');
           out = out.replace(re, (_match, prefix, _token) => `${prefix}${readable}`);
         }
         return out;
