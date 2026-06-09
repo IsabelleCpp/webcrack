@@ -11,6 +11,7 @@ import controlFlowObject from './control-flow-object';
 import controlFlowSwitch from './control-flow-switch';
 import deadCode from './dead-code';
 import { findDecoders } from './decoder';
+import { findXorHexDecoder } from './findXorHexDecoder';
 import { getDecoderForMap } from './get-map-decoder';
 import { findEncryptedStringMap } from './hex-xor-keyed-map-finder';
 import inlineDecodedStrings from './inline-decoded-strings';
@@ -114,5 +115,12 @@ export default {
       encryptedMap.decoderGlobalPath?.remove();
       state.changes += 4;
     }
+    const xorHexDecoder = findXorHexDecoder(ast);
+    logger(
+      xorHexDecoder
+        ? `xorHexDecoder: ${xorHexDecoder.originalName} renamed to ${xorHexDecoder.name}`
+        : 'xorHexDecoder: no',
+    );
+    if (!xorHexDecoder) return;
   },
 } satisfies AsyncTransform<Sandbox>;
