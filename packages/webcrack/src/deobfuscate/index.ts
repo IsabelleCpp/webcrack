@@ -144,15 +144,5 @@ export default {
     state.changes += (
       await applyTransformAsync(ast, inlineDecodedStrings, { vm: vmXor })
     ).changes;
-
-    if (xorDecoders.length > 0) {
-      for (const d of xorDecoders) {
-        try {
-          d.path.remove();
-          state.changes += 1;
-        } catch {
-        }
-      }
-    }
   },
 } satisfies AsyncTransform<Sandbox>;
