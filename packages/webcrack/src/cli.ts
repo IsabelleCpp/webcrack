@@ -39,7 +39,7 @@ program
   .option('-f, --force', 'overwrite output directory')
   .option('-m, --mangle', 'mangle variable names')
   .option('--no-jsx', 'do not decompile JSX')
-  .option('--no-unpack', 'do not extract modules from the bundle')
+  .option('--unpack', 'extract modules from the bundle')
   .option('--no-deobfuscate', 'do not deobfuscate the code')
   .option('--no-unminify', 'do not unminify the code')
   .argument('[file]', 'input file, defaults to stdin')

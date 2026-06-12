@@ -113,7 +113,7 @@ function mergeOptions(options: Options): asserts options is Required<Options> {
   const mergedOptions: Required<Options> = {
     jsx: true,
     unminify: true,
-    unpack: true,
+    unpack: false,
     deobfuscate: true,
     mangle: false,
     plugins: options.plugins ?? {},
